@@ -1,0 +1,57 @@
+# Android & Gradle
+.gradle/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local configuration
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Native/NDK
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Distribution artifacts
+*.apk
+*.aab
+*.ap_
+
+# Logs and misc
+*.log
+.DS_Store
+Thumbs.db
+
+# Signing materials
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Google/Firebase
+google-services.json
+GoogleService-Info.plist
+
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+opencv/
