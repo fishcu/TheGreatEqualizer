@@ -25,12 +25,14 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
@@ -51,6 +53,12 @@ import org.opencv.core.MatOfFloat
 import org.opencv.core.MatOfInt
 import org.opencv.imgproc.Imgproc
 import java.util.ArrayList
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,12 +79,101 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun PickerScreen(modifier: Modifier = Modifier) {
     var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
-    var processedBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var originalBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var fullResBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewOriginalBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewProcessedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var showOriginal by remember { mutableStateOf(false) }
     var wheelHue by remember { mutableStateOf(0f) }
     var wheelSat by remember { mutableStateOf(0f) }
+    var heSmoothing by remember { mutableStateOf(0.02f) }
+    var gamma by remember { mutableStateOf(1.0f) }
+    var displayWidthPx by remember { mutableStateOf(0) }
+    var displayHeightPx by remember { mutableStateOf(0) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var progressiveJob by remember { mutableStateOf<Job?>(null) }
+
+    fun computePreviewBitmap(src: Bitmap, displayW: Int, displayH: Int): Bitmap {
+        val origW = src.width
+        val origH = src.height
+        val origArea = origW.toLong() * origH.toLong()
+        val displayArea = (displayW.toLong() * displayH.toLong()).coerceAtLeast(0L)
+        val targetArea = kotlin.math.max(displayArea, 1_000_000L) // at least 1MP for preview
+        if (origArea <= targetArea) return src
+        val scale = kotlin.math.sqrt(targetArea.toDouble() / origArea.toDouble())
+        var newW = kotlin.math.max(1, kotlin.math.round(origW * scale).toInt())
+        var newH = kotlin.math.max(1, kotlin.math.round(origH * scale).toInt())
+        if (newW > origW || newH > origH) {
+            newW = origW
+            newH = origH
+        }
+        return Bitmap.createScaledBitmap(src, newW, newH, true)
+    }
+
+    fun computePreviewTargetSize(src: Bitmap, displayW: Int, displayH: Int): Pair<Int, Int> {
+        val origW = src.width
+        val origH = src.height
+        val origArea = origW.toLong() * origH.toLong()
+        val displayArea = (displayW.toLong() * displayH.toLong()).coerceAtLeast(0L)
+        val targetArea = kotlin.math.max(displayArea, 1_000_000L)
+        if (origArea <= targetArea) return Pair(origW, origH)
+        val scale = kotlin.math.sqrt(targetArea.toDouble() / origArea.toDouble())
+        var newW = kotlin.math.max(1, kotlin.math.round(origW * scale).toInt())
+        var newH = kotlin.math.max(1, kotlin.math.round(origH * scale).toInt())
+        if (newW > origW || newH > origH) {
+            newW = origW
+            newH = origH
+        }
+        return Pair(newW, newH)
+    }
+
+    fun computeLevelSizes(srcW: Int, srcH: Int, topW: Int, topH: Int): List<Pair<Int, Int>> {
+        val aspectW = srcW.toDouble()
+        val aspectH = srcH.toDouble()
+        val longTop = kotlin.math.max(topW, topH)
+        val longMin = kotlin.math.min(256, longTop)
+        val sizes = ArrayList<Pair<Int, Int>>()
+        var current = longMin
+        while (true) {
+            val size = if (aspectW >= aspectH) {
+                val w = current
+                val h = kotlin.math.max(1, kotlin.math.round(current * (aspectH / aspectW)).toInt())
+                Pair(w, h)
+            } else {
+                val h = current
+                val w = kotlin.math.max(1, kotlin.math.round(current * (aspectW / aspectH)).toInt())
+                Pair(w, h)
+            }
+            if (sizes.isEmpty() || sizes.last() != size) sizes.add(size)
+            if (current >= longTop) break
+            val next = current * 2
+            current = if (next >= longTop) longTop else next
+        }
+        return sizes
+    }
+
+    fun startProgressivePreview() {
+        val src = fullResBitmap ?: return
+        val (topW, topH) = computePreviewTargetSize(src, displayWidthPx, displayHeightPx)
+        val sizes = computeLevelSizes(src.width, src.height, topW, topH)
+        progressiveJob?.cancel()
+        progressiveJob = scope.launch(Dispatchers.Default) {
+            for ((w, h) in sizes) {
+                if (!isActive) break
+                val scaled = Bitmap.createScaledBitmap(src, w, h, true)
+                val weights = if (wheelSat <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(wheelHue, wheelSat)
+                val out = processBitmapLinearLumaSmoothstep(scaled, weights, heSmoothing.toDouble(), gamma.toDouble())
+                withContext(Dispatchers.Main) {
+                    previewOriginalBitmap = scaled
+                    previewProcessedBitmap = out
+                }
+            }
+        }
+    }
+
+    fun updatePreviewBitmaps() {
+        startProgressivePreview()
+    }
     val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -90,17 +187,15 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                     decoder.isMutableRequired = true
                 }
 
-                val defaultWeights = Triple(0.2126, 0.7152, 0.0722)
-                val weights = if (wheelSat <= 0f) defaultWeights else hsvToLinearRgbWeights(wheelHue, wheelSat)
-                val outBitmap = processBitmapLinearLumaSmoothstep(srcBitmap, weights)
-                originalBitmap = srcBitmap
-                processedBitmap = outBitmap
+                fullResBitmap = srcBitmap
+                // Build initial preview (will use 1MP if display size not known yet)
+                updatePreviewBitmaps()
             } catch (e: Exception) {
                 Log.e("Processor", "Failed to process image", e)
-                processedBitmap = null
+                previewProcessedBitmap = null
             }
         } else {
-            processedBitmap = null
+            previewProcessedBitmap = null
         }
     }
 
@@ -113,10 +208,12 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             }
 
             Button(onClick = {
-            val bmp = processedBitmap
-            if (bmp == null) {
-                Toast.makeText(context, "No processed image to export", Toast.LENGTH_SHORT).show()
+            val srcFull = fullResBitmap
+            if (srcFull == null) {
+                Toast.makeText(context, "No image to export", Toast.LENGTH_SHORT).show()
             } else {
+                val weights = if (wheelSat <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(wheelHue, wheelSat)
+                val processedFull = processBitmapLinearLumaSmoothstep(srcFull, weights, heSmoothing.toDouble(), gamma.toDouble())
                 val filename = "TGE_" + System.currentTimeMillis().toString() + ".jpg"
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, filename)
@@ -129,7 +226,7 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                     val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                     if (uri != null) {
                         resolver.openOutputStream(uri)?.use { out ->
-                            bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                            processedFull.compress(Bitmap.CompressFormat.JPEG, 95, out)
                         }
                         val clearPending = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
                         resolver.update(uri, clearPending, null, null)
@@ -147,12 +244,20 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        val bmpToShow = if (showOriginal) originalBitmap else processedBitmap
-        if (bmpToShow != null) {
-            Image(
-                bitmap = bmpToShow.asImageBitmap(),
-                contentDescription = if (showOriginal) "Original image" else "Processed image",
-                modifier = Modifier.pointerInput(Unit) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxSize()
+                .onSizeChanged { sz ->
+                    val w = sz.width
+                    val h = sz.height
+                    if (w != displayWidthPx || h != displayHeightPx) {
+                        displayWidthPx = w
+                        displayHeightPx = h
+                        if (fullResBitmap != null) updatePreviewBitmaps()
+                    }
+                }
+                .pointerInput(Unit) {
                     detectTapGestures(
                         onPress = {
                             showOriginal = true
@@ -161,9 +266,17 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                         }
                     )
                 }
-            )
-        } else if (selectedUri != null) {
-            Text("Image selected. Processing failed or pending.")
+        ) {
+            val bmpToShow = if (showOriginal) previewOriginalBitmap else previewProcessedBitmap
+            if (bmpToShow != null) {
+                Image(
+                    bitmap = bmpToShow.asImageBitmap(),
+                    contentDescription = if (showOriginal) "Original image" else "Processed image",
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if (selectedUri != null) {
+                Text("Image selected. Processing failed or pending.")
+            }
         }
 
         // HSV wheel below image
@@ -173,13 +286,33 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             onChange = { h, s ->
                 wheelHue = h
                 wheelSat = s
-                val src = originalBitmap
-                if (src != null) {
-                    val weights = if (s <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(h, s)
-                    processedBitmap = processBitmapLinearLumaSmoothstep(src, weights)
-                }
+                updatePreviewBitmaps()
             },
             modifier = Modifier.padding(top = 12.dp)
+        )
+
+        Row(modifier = Modifier.padding(top = 12.dp)) {
+            Text("HE smoothing")
+        }
+        Slider(
+            value = heSmoothing,
+            onValueChange = { v ->
+                heSmoothing = v
+                updatePreviewBitmaps()
+            },
+            valueRange = 0f..1f
+        )
+
+        Row(modifier = Modifier.padding(top = 12.dp)) {
+            Text("Gamma g")
+        }
+        Slider(
+            value = gamma,
+            onValueChange = { v ->
+                gamma = v
+                updatePreviewBitmaps()
+            },
+            valueRange = 0.2f..3.0f
         )
     }
 }
@@ -296,7 +429,9 @@ private fun srgbToLinearScalar(c: Double): Double {
 
 private fun processBitmapLinearLumaSmoothstep(
     srcBitmap: Bitmap,
-    weights: Triple<Double, Double, Double>
+    weights: Triple<Double, Double, Double>,
+    heSmoothing: Double,
+    gamma: Double
 ): Bitmap {
     val src8 = Mat()
     Utils.bitmapToMat(srcBitmap, src8)
@@ -332,29 +467,40 @@ private fun processBitmapLinearLumaSmoothstep(
     Core.addWeighted(ch[0], wr, ch[1], wg, 0.0, lum)
     Core.addWeighted(lum, 1.0, ch[2], wb, 0.0, lum)
 
-    // Manual histogram equalization on luminance using 256-bin CDF-based LUT
-    val lum8 = Mat()
-    lum.convertTo(lum8, CvType.CV_8UC1, 255.0)
-    val hist = Mat()
-    Imgproc.calcHist(listOf(lum8), MatOfInt(0), Mat(), hist, MatOfInt(256), MatOfFloat(0f, 256f))
-    // Build CDF and LUT
-    var cdf = 0.0
-    var cdfMin = -1.0
-    val totalPix = lum8.rows() * lum8.cols()
-    val lut = Mat(1, 256, CvType.CV_8UC1)
-    var iBin = 0
-    while (iBin < 256) {
-        val h = hist.get(iBin, 0)[0]
-        cdf += h
-        if (cdfMin < 0.0 && cdf > 0.0) cdfMin = cdf
-        val valEq = if (cdfMin > 0.0) ((cdf - cdfMin) * 255.0 / (totalPix - cdfMin)) else 0.0
-        lut.put(0, iBin, kotlin.math.max(0.0, kotlin.math.min(255.0, valEq)))
-        iBin++
-    }
-    val lum8Eq = Mat()
-    Core.LUT(lum8, lut, lum8Eq)
-    val lumEqF = Mat()
-    lum8Eq.convertTo(lumEqF, CvType.CV_32FC1, 1.0 / 255.0)
+	// Full-float mapping: 1024-bin histogram, smoothed CDF, and continuous float remap (no 8-bit LUT)
+	val bins = 1024
+	val hist = Mat()
+	Imgproc.calcHist(listOf(lum), MatOfInt(0), Mat(), hist, MatOfInt(bins), MatOfFloat(0f, 1f))
+	val alpha = kotlin.math.min(1.0, kotlin.math.max(0.0, heSmoothing))
+	val totalPix = (lum.rows() * lum.cols()).toDouble()
+	val meanCount = totalPix / bins.toDouble()
+	val histSmoothed = Mat(hist.rows(), hist.cols(), hist.type())
+	Core.multiply(hist, Scalar(1.0 - alpha), histSmoothed)
+	Core.add(histSmoothed, Scalar(alpha * meanCount), histSmoothed)
+	val cdfRow = Mat(1, bins, CvType.CV_32FC1)
+	var cdf = 0.0
+	var cdfMin = -1.0
+	val totalSmoothed = (1.0 - alpha) * totalPix + alpha * (meanCount * bins)
+	var b = 0
+	while (b < bins) {
+		val h = histSmoothed.get(b, 0)[0]
+		cdf += h
+		if (cdfMin < 0.0 && cdf > 0.0) cdfMin = cdf
+		val v = if (cdfMin > 0.0) ((cdf - cdfMin) / (totalSmoothed - cdfMin)) else 0.0
+		val clamped = if (v < 0.0) 0.0f else if (v > 1.0) 1.0f else v.toFloat()
+		cdfRow.put(0, b, clamped.toDouble())
+		b++
+	}
+	// Build per-pixel map into the 1xBins CDF row: x = lum * (bins-1), y = 0
+	val idx = Mat()
+	Core.multiply(lum, Scalar((bins - 1).toDouble()), idx)
+	val zeroMap = Mat(lum.rows(), lum.cols(), CvType.CV_32FC1, Scalar(0.0))
+	val map = Mat()
+	Core.merge(listOf(idx, zeroMap), map)
+    val lumEqF = Mat(lum.rows(), lum.cols(), CvType.CV_32FC1)
+    Imgproc.remap(cdfRow, lumEqF, map, Mat(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE, Scalar(0.0))
+    // Apply target CDF via inverse: y = G^{-1}(u). For power CDF G(y)=y^g, use y = u^(1/gamma)
+    Core.pow(lumEqF, 1.0 / gamma, lumEqF)
     // Scale RGB (linear) to match equalized luminance
     val eps = 1e-6
     val denom = Mat()
@@ -401,7 +547,7 @@ private fun processBitmapLinearLumaSmoothstep(
     srcF.convertTo(out8, CvType.CV_8UC4, 255.0)
     val outBitmap = Bitmap.createBitmap(srcBitmap.width, srcBitmap.height, Bitmap.Config.ARGB_8888)
     Utils.matToBitmap(out8, outBitmap)
-    src8.release(); srcF.release(); out8.release(); lum.release(); lum8.release(); lum8Eq.release(); lumEqF.release(); lut.release(); hist.release(); denom.release(); scale.release()
+    src8.release(); srcF.release(); out8.release(); lum.release(); idx.release(); zeroMap.release(); map.release(); lumEqF.release(); hist.release(); histSmoothed.release(); cdfRow.release(); denom.release(); scale.release()
     return outBitmap
 }
 
