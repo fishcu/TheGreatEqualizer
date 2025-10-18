@@ -42,6 +42,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import com.example.thegreatequalizer.ui.theme.TheGreatEqualizerTheme
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
@@ -84,8 +85,13 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
     var previewOriginalBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var previewProcessedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var showOriginal by remember { mutableStateOf(false) }
-    var wheelHue by remember { mutableStateOf(0f) }
-    var wheelSat by remember { mutableStateOf(0f) }
+    // Per-parameter HSV wheels (produce RGB vectors normalized by max component)
+    var hueS by remember { mutableStateOf(0f) }
+    var satS by remember { mutableStateOf(0f) }
+    var hueT by remember { mutableStateOf(0f) }
+    var satT by remember { mutableStateOf(0f) }
+    var hueG by remember { mutableStateOf(0f) }
+    var satG by remember { mutableStateOf(0f) }
     var heSmoothing by remember { mutableStateOf(0.02f) }
     // Histogram specification parameters (raw in [-2,2], effective via exp2)
     var rawS by remember { mutableStateOf(0f) }
@@ -165,11 +171,31 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             for ((w, h) in sizes) {
                 if (!isActive) break
                 val scaled = Bitmap.createScaledBitmap(src, w, h, true)
-                val weights = if (wheelSat <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(wheelHue, wheelSat)
-                val sEff = 2.0.pow(rawS.toDouble())
-                val tEff = 2.0.pow(rawT.toDouble())
-                val gEff = 2.0.pow(rawG.toDouble())
-                val out = processBitmapLinearLumaSmoothstep(scaled, weights, heSmoothing.toDouble(), sEff, tEff, gEff)
+                val sVec = hsvToRgbVectorMaxNormalized(hueS, satS)
+                val tVec = hsvToRgbVectorMaxNormalized(hueT, satT)
+                val gVec = hsvToRgbVectorMaxNormalized(hueG, satG)
+                val sEff = Triple(
+                    2.0.pow(rawS.toDouble() * sVec.first),
+                    2.0.pow(rawS.toDouble() * sVec.second),
+                    2.0.pow(rawS.toDouble() * sVec.third)
+                )
+                val tEff = Triple(
+                    2.0.pow(rawT.toDouble() * tVec.first),
+                    2.0.pow(rawT.toDouble() * tVec.second),
+                    2.0.pow(rawT.toDouble() * tVec.third)
+                )
+                val gEff = Triple(
+                    2.0.pow(rawG.toDouble() * gVec.first),
+                    2.0.pow(rawG.toDouble() * gVec.second),
+                    2.0.pow(rawG.toDouble() * gVec.third)
+                )
+                val out = processBitmapRgbPerChannelSmoothstep(
+                    scaled,
+                    heSmoothing.toDouble(),
+                    sEff,
+                    tEff,
+                    gEff
+                )
                 withContext(Dispatchers.Main) {
                     previewOriginalBitmap = scaled
                     previewProcessedBitmap = out
@@ -219,11 +245,31 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             if (srcFull == null) {
                 Toast.makeText(context, "No image to export", Toast.LENGTH_SHORT).show()
             } else {
-                val weights = if (wheelSat <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(wheelHue, wheelSat)
-                val sEff = 2.0.pow(rawS.toDouble())
-                val tEff = 2.0.pow(rawT.toDouble())
-                val gEff = 2.0.pow(rawG.toDouble())
-                val processedFull = processBitmapLinearLumaSmoothstep(srcFull, weights, heSmoothing.toDouble(), sEff, tEff, gEff)
+                val sVec = hsvToRgbVectorMaxNormalized(hueS, satS)
+                val tVec = hsvToRgbVectorMaxNormalized(hueT, satT)
+                val gVec = hsvToRgbVectorMaxNormalized(hueG, satG)
+                val sEff = Triple(
+                    2.0.pow(rawS.toDouble() * sVec.first),
+                    2.0.pow(rawS.toDouble() * sVec.second),
+                    2.0.pow(rawS.toDouble() * sVec.third)
+                )
+                val tEff = Triple(
+                    2.0.pow(rawT.toDouble() * tVec.first),
+                    2.0.pow(rawT.toDouble() * tVec.second),
+                    2.0.pow(rawT.toDouble() * tVec.third)
+                )
+                val gEff = Triple(
+                    2.0.pow(rawG.toDouble() * gVec.first),
+                    2.0.pow(rawG.toDouble() * gVec.second),
+                    2.0.pow(rawG.toDouble() * gVec.third)
+                )
+                val processedFull = processBitmapRgbPerChannelSmoothstep(
+                    srcFull,
+                    heSmoothing.toDouble(),
+                    sEff,
+                    tEff,
+                    gEff
+                )
                 val filename = "TGE_" + System.currentTimeMillis().toString() + ".jpg"
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, filename)
@@ -289,18 +335,6 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             }
         }
 
-        // HSV wheel below image
-        HsvWheel(
-            hue = wheelHue,
-            saturation = wheelSat,
-            onChange = { h, s ->
-                wheelHue = h
-                wheelSat = s
-                updatePreviewBitmaps()
-            },
-            modifier = Modifier.padding(top = 12.dp)
-        )
-
         Row(modifier = Modifier.padding(top = 12.dp)) {
             Text("HE smoothing")
         }
@@ -313,41 +347,83 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             valueRange = 0f..1f
         )
 
+        // t controls with its HSV wheel
         Row(modifier = Modifier.padding(top = 12.dp)) {
-            Text("t (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawT.toDouble())))
+            HsvWheel(
+                hue = hueT,
+                saturation = satT,
+                onChange = { h, s ->
+                    hueT = h
+                    satT = s
+                    updatePreviewBitmaps()
+                },
+                modifier = Modifier.padding(end = 12.dp),
+                sizeDp = 120.dp
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text("t (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawT.toDouble())))
+                Slider(
+                    value = rawT,
+                    onValueChange = { v ->
+                        rawT = v
+                        updatePreviewBitmaps()
+                    },
+                    valueRange = -2f..2f
+                )
+            }
         }
-        Slider(
-            value = rawT,
-            onValueChange = { v ->
-                rawT = v
-                updatePreviewBitmaps()
-            },
-            valueRange = -2f..2f
-        )
 
+        // s controls with its HSV wheel
         Row(modifier = Modifier.padding(top = 12.dp)) {
-            Text("s (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawS.toDouble())))
+            HsvWheel(
+                hue = hueS,
+                saturation = satS,
+                onChange = { h, s ->
+                    hueS = h
+                    satS = s
+                    updatePreviewBitmaps()
+                },
+                modifier = Modifier.padding(end = 12.dp),
+                sizeDp = 120.dp
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text("s (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawS.toDouble())))
+                Slider(
+                    value = rawS,
+                    onValueChange = { v ->
+                        rawS = v
+                        updatePreviewBitmaps()
+                    },
+                    valueRange = -2f..2f
+                )
+            }
         }
-        Slider(
-            value = rawS,
-            onValueChange = { v ->
-                rawS = v
-                updatePreviewBitmaps()
-            },
-            valueRange = -2f..2f
-        )
 
+        // g controls with its HSV wheel
         Row(modifier = Modifier.padding(top = 12.dp)) {
-            Text("g (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawG.toDouble())))
+            HsvWheel(
+                hue = hueG,
+                saturation = satG,
+                onChange = { h, s ->
+                    hueG = h
+                    satG = s
+                    updatePreviewBitmaps()
+                },
+                modifier = Modifier.padding(end = 12.dp),
+                sizeDp = 120.dp
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text("g (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawG.toDouble())))
+                Slider(
+                    value = rawG,
+                    onValueChange = { v ->
+                        rawG = v
+                        updatePreviewBitmaps()
+                    },
+                    valueRange = -2f..2f
+                )
+            }
         }
-        Slider(
-            value = rawG,
-            onValueChange = { v ->
-                rawG = v
-                updatePreviewBitmaps()
-            },
-            valueRange = -2f..2f
-        )
     }
 }
 
@@ -356,7 +432,8 @@ private fun HsvWheel(
     hue: Float,
     saturation: Float,
     onChange: (Float, Float) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    sizeDp: Dp = 200.dp
 ) {
     var sizePx by remember { mutableStateOf(0) }
     val wheelBitmap = remember(sizePx) {
@@ -365,7 +442,7 @@ private fun HsvWheel(
     Box(
         modifier = modifier
             .padding(12.dp)
-            .size(200.dp)
+            .size(sizeDp)
             .onSizeChanged { sizePx = kotlin.math.min(it.width, it.height) }
             .pointerInput(sizePx) {
                 if (sizePx <= 0) return@pointerInput
@@ -473,6 +550,153 @@ private fun hsvToLinearRgbWeights(hue: Float, saturation: Float): Triple<Double,
 
 private fun srgbToLinearScalar(c: Double): Double {
     return if (c <= 0.04045) c / 12.92 else Math.pow((c + 0.055) / 1.055, 2.4)
+}
+
+private fun hsvToRgbVectorMaxNormalized(hue: Float, saturation: Float): Triple<Double, Double, Double> {
+    val hsv = floatArrayOf(hue, saturation, 1f)
+    val color = AndroidColor.HSVToColor(hsv)
+    val r = ((color shr 16) and 0xFF) / 255.0
+    val g = ((color shr 8) and 0xFF) / 255.0
+    val b = (color and 0xFF) / 255.0
+    val m = kotlin.math.max(r, kotlin.math.max(g, b))
+    return if (m <= 1e-9) Triple(0.0, 0.0, 0.0) else Triple(r / m, g / m, b / m)
+}
+
+private fun processBitmapRgbPerChannelSmoothstep(
+    srcBitmap: Bitmap,
+    heSmoothing: Double,
+    sEff: Triple<Double, Double, Double>,
+    tEff: Triple<Double, Double, Double>,
+    gEff: Triple<Double, Double, Double>
+): Bitmap {
+    val src8 = Mat()
+    Utils.bitmapToMat(srcBitmap, src8)
+    val srcF = Mat()
+    src8.convertTo(srcF, CvType.CV_32FC4, 1.0 / 255.0)
+    val ch = ArrayList<Mat>(4)
+    Core.split(srcF, ch)
+
+    fun srgbToLinear(channel: Mat) {
+        val mask = Mat()
+        val thr = Mat(channel.rows(), channel.cols(), channel.type(), Scalar(0.04045))
+        Core.compare(channel, thr, mask, Core.CMP_LE)
+        val low = Mat()
+        Core.divide(channel, Scalar(12.92), low)
+        val highTmp = Mat()
+        Core.add(channel, Scalar(0.055), highTmp)
+        Core.divide(highTmp, Scalar(1.055), highTmp)
+        Core.pow(highTmp, 2.4, highTmp)
+        low.copyTo(channel, mask)
+        val invMask = Mat()
+        val zero = Mat(mask.rows(), mask.cols(), mask.type(), Scalar(0.0))
+        Core.compare(mask, zero, invMask, Core.CMP_EQ)
+        highTmp.copyTo(channel, invMask)
+        mask.release(); thr.release(); low.release(); highTmp.release(); invMask.release(); zero.release()
+    }
+
+    fun linearToSrgb(channel: Mat) {
+        val mask = Mat()
+        val thr = Mat(channel.rows(), channel.cols(), channel.type(), Scalar(0.0031308))
+        Core.compare(channel, thr, mask, Core.CMP_LE)
+        val low = Mat()
+        Core.multiply(channel, Scalar(12.92), low)
+        val highTmp = Mat()
+        Core.pow(channel, 1.0 / 2.4, highTmp)
+        Core.multiply(highTmp, Scalar(1.055), highTmp)
+        Core.subtract(highTmp, Scalar(0.055), highTmp)
+        low.copyTo(channel, mask)
+        val invMask = Mat()
+        val zero = Mat(mask.rows(), mask.cols(), mask.type(), Scalar(0.0))
+        Core.compare(mask, zero, invMask, Core.CMP_EQ)
+        highTmp.copyTo(channel, invMask)
+        mask.release(); thr.release(); low.release(); highTmp.release(); invMask.release(); zero.release()
+    }
+
+    // Work in linear light
+    srgbToLinear(ch[0])
+    srgbToLinear(ch[1])
+    srgbToLinear(ch[2])
+
+    fun eqAndShapeChannel(channel: Mat, s: Double, t: Double, g: Double) {
+        val bins = 1024
+        val hist = Mat()
+        Imgproc.calcHist(listOf(channel), MatOfInt(0), Mat(), hist, MatOfInt(bins), MatOfFloat(0f, 1f))
+        val alpha = kotlin.math.min(1.0, kotlin.math.max(0.0, heSmoothing))
+        val totalPix = (channel.rows() * channel.cols()).toDouble()
+        val meanCount = totalPix / bins.toDouble()
+        val histSmoothed = Mat(hist.rows(), hist.cols(), hist.type())
+        Core.multiply(hist, Scalar(1.0 - alpha), histSmoothed)
+        Core.add(histSmoothed, Scalar(alpha * meanCount), histSmoothed)
+        val cdfRow = Mat(1, bins, CvType.CV_32FC1)
+        var cdf = 0.0
+        var cdfMin = -1.0
+        val totalSmoothed = (1.0 - alpha) * totalPix + alpha * (meanCount * bins)
+        var b = 0
+        while (b < bins) {
+            val h = histSmoothed.get(b, 0)[0]
+            cdf += h
+            if (cdfMin < 0.0 && cdf > 0.0) cdfMin = cdf
+            val v = if (cdfMin > 0.0) ((cdf - cdfMin) / (totalSmoothed - cdfMin)) else 0.0
+            val clamped = if (v < 0.0) 0.0f else if (v > 1.0) 1.0f else v.toFloat()
+            cdfRow.put(0, b, clamped.toDouble())
+            b++
+        }
+        val idx = Mat()
+        Core.multiply(channel, Scalar((bins - 1).toDouble()), idx)
+        val zeroMap = Mat(channel.rows(), channel.cols(), CvType.CV_32FC1, Scalar(0.0))
+        val map = Mat()
+        Core.merge(listOf(idx, zeroMap), map)
+        val chEq = Mat(channel.rows(), channel.cols(), CvType.CV_32FC1)
+        Imgproc.remap(cdfRow, chEq, map, Mat(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE, Scalar(0.0))
+
+        val invS = 1.0 / s
+        val invT = 1.0 / t
+        val invG = 1.0 / g
+        val invRow = Mat(1, bins, CvType.CV_32FC1)
+        var iBin = 0
+        while (iBin < bins) {
+            val u = iBin.toDouble() / (bins - 1).toDouble()
+            val y = targetCdf(u, invS, invT, invG)
+            invRow.put(0, iBin, y)
+            iBin++
+        }
+        val idx2 = Mat()
+        Core.multiply(chEq, Scalar((bins - 1).toDouble()), idx2)
+        val map2 = Mat()
+        Core.merge(listOf(idx2, zeroMap), map2)
+        val chTarget = Mat(channel.rows(), channel.cols(), CvType.CV_32FC1)
+        Imgproc.remap(invRow, chTarget, map2, Mat(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE, Scalar(0.0))
+
+        chTarget.copyTo(channel)
+
+        // release
+        hist.release(); histSmoothed.release(); cdfRow.release(); idx.release(); zeroMap.release(); map.release(); chEq.release(); invRow.release(); idx2.release(); map2.release(); chTarget.release()
+    }
+
+    eqAndShapeChannel(ch[0], sEff.first, tEff.first, gEff.first)
+    eqAndShapeChannel(ch[1], sEff.second, tEff.second, gEff.second)
+    eqAndShapeChannel(ch[2], sEff.third, tEff.third, gEff.third)
+
+    linearToSrgb(ch[0])
+    linearToSrgb(ch[1])
+    linearToSrgb(ch[2])
+
+    Core.max(ch[0], Scalar(0.0), ch[0])
+    Core.min(ch[0], Scalar(1.0), ch[0])
+    Core.max(ch[1], Scalar(0.0), ch[1])
+    Core.min(ch[1], Scalar(1.0), ch[1])
+    Core.max(ch[2], Scalar(0.0), ch[2])
+    Core.min(ch[2], Scalar(1.0), ch[2])
+
+    Core.merge(ch, srcF)
+    ch.forEach { it.release() }
+
+    val out8 = Mat()
+    srcF.convertTo(out8, CvType.CV_8UC4, 255.0)
+    val outBitmap = Bitmap.createBitmap(srcBitmap.width, srcBitmap.height, Bitmap.Config.ARGB_8888)
+    Utils.matToBitmap(out8, outBitmap)
+    src8.release(); srcF.release(); out8.release()
+    return outBitmap
 }
 
 private fun processBitmapLinearLumaSmoothstep(
