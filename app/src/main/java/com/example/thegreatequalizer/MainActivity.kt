@@ -37,7 +37,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
@@ -54,7 +53,6 @@ import org.opencv.core.MatOfFloat
 import org.opencv.core.MatOfInt
 import org.opencv.imgproc.Imgproc
 import java.util.ArrayList
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -71,7 +69,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             TheGreatEqualizerTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    PickerScreen(modifier = Modifier.padding(innerPadding))
+                    ImageEqualizerScreen(modifier = Modifier.padding(innerPadding))
                 }
             }
         }
@@ -79,11 +77,11 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun PickerScreen(modifier: Modifier = Modifier) {
-    var selectedUri by remember { mutableStateOf<android.net.Uri?>(null) }
-    var fullResBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var previewOriginalBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var previewProcessedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+private fun ImageEqualizerScreen(modifier: Modifier = Modifier) {
+    var selectedImageUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var sourceBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewOriginal by remember { mutableStateOf<Bitmap?>(null) }
+    var previewProcessed by remember { mutableStateOf<Bitmap?>(null) }
     var showOriginal by remember { mutableStateOf(false) }
     // Per-parameter HSV wheels (produce RGB vectors normalized by max component)
     var hueS by remember { mutableStateOf(0f) }
@@ -92,16 +90,16 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
     var satT by remember { mutableStateOf(0f) }
     var hueG by remember { mutableStateOf(0f) }
     var satG by remember { mutableStateOf(0f) }
-    var heSmoothing by remember { mutableStateOf(0.02f) }
+    var histogramSmoothingAlpha by remember { mutableStateOf(0.02f) }
     // Histogram specification parameters (raw in [-2,2], effective via exp2)
-    var rawS by remember { mutableStateOf(0f) }
-    var rawT by remember { mutableStateOf(0f) }
-    var rawG by remember { mutableStateOf(0f) }
-    var displayWidthPx by remember { mutableStateOf(0) }
-    var displayHeightPx by remember { mutableStateOf(0) }
+    var log2S by remember { mutableStateOf(0f) }
+    var log2T by remember { mutableStateOf(0f) }
+    var log2G by remember { mutableStateOf(0f) }
+    var previewWidthPx by remember { mutableStateOf(0) }
+    var previewHeightPx by remember { mutableStateOf(0) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var progressiveJob by remember { mutableStateOf<Job?>(null) }
+    var previewJob by remember { mutableStateOf<Job?>(null) }
 
 
     fun computePreviewTargetSize(src: Bitmap, displayW: Int, displayH: Int): Pair<Int, Int> {
@@ -121,7 +119,7 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
         return Pair(newW, newH)
     }
 
-    fun computeLevelSizes(srcW: Int, srcH: Int, topW: Int, topH: Int): List<Pair<Int, Int>> {
+    fun computeProgressivePreviewSizes(srcW: Int, srcH: Int, topW: Int, topH: Int): List<Pair<Int, Int>> {
         val aspectW = srcW.toDouble()
         val aspectH = srcH.toDouble()
         val longTop = kotlin.math.max(topW, topH)
@@ -146,55 +144,52 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
         return sizes
     }
 
-    fun startProgressivePreview() {
-        val src = fullResBitmap ?: return
-        val (topW, topH) = computePreviewTargetSize(src, displayWidthPx, displayHeightPx)
-        val sizes = computeLevelSizes(src.width, src.height, topW, topH)
-        progressiveJob?.cancel()
-        progressiveJob = scope.launch(Dispatchers.Default) {
+    fun scheduleProgressivePreview() {
+        val src = sourceBitmap ?: return
+        val (topW, topH) = computePreviewTargetSize(src, previewWidthPx, previewHeightPx)
+        val sizes = computeProgressivePreviewSizes(src.width, src.height, topW, topH)
+        previewJob?.cancel()
+        previewJob = scope.launch(Dispatchers.Default) {
             for ((w, h) in sizes) {
                 if (!isActive) break
                 val scaled = Bitmap.createScaledBitmap(src, w, h, true)
-                val sVec = hsvToRgbVectorMaxNormalized(hueS, satS)
-                val tVec = hsvToRgbVectorMaxNormalized(hueT, satT)
-                val gVec = hsvToRgbVectorMaxNormalized(hueG, satG)
-                val sEff = Triple(
-                    2.0.pow(rawS.toDouble() * sVec.first),
-                    2.0.pow(rawS.toDouble() * sVec.second),
-                    2.0.pow(rawS.toDouble() * sVec.third)
+                val sVec = hsvToMaxNormalizedRgb(hueS, satS)
+                val tVec = hsvToMaxNormalizedRgb(hueT, satT)
+                val gVec = hsvToMaxNormalizedRgb(hueG, satG)
+                val scaleS = Triple(
+                    2.0.pow(log2S.toDouble() * sVec.first),
+                    2.0.pow(log2S.toDouble() * sVec.second),
+                    2.0.pow(log2S.toDouble() * sVec.third)
                 )
-                val tEff = Triple(
-                    2.0.pow(rawT.toDouble() * tVec.first),
-                    2.0.pow(rawT.toDouble() * tVec.second),
-                    2.0.pow(rawT.toDouble() * tVec.third)
+                val scaleT = Triple(
+                    2.0.pow(log2T.toDouble() * tVec.first),
+                    2.0.pow(log2T.toDouble() * tVec.second),
+                    2.0.pow(log2T.toDouble() * tVec.third)
                 )
-                val gEff = Triple(
-                    2.0.pow(rawG.toDouble() * gVec.first),
-                    2.0.pow(rawG.toDouble() * gVec.second),
-                    2.0.pow(rawG.toDouble() * gVec.third)
+                val scaleG = Triple(
+                    2.0.pow(log2G.toDouble() * gVec.first),
+                    2.0.pow(log2G.toDouble() * gVec.second),
+                    2.0.pow(log2G.toDouble() * gVec.third)
                 )
-                val out = processBitmapRgbPerChannelSmoothstep(
+                val out = applyPerChannelCdfShaping(
                     scaled,
-                    heSmoothing.toDouble(),
-                    sEff,
-                    tEff,
-                    gEff
+                    histogramSmoothingAlpha.toDouble(),
+                    scaleS,
+                    scaleT,
+                    scaleG
                 )
                 withContext(Dispatchers.Main) {
-                    previewOriginalBitmap = scaled
-                    previewProcessedBitmap = out
+                    previewOriginal = scaled
+                    previewProcessed = out
                 }
             }
         }
     }
 
-    fun updatePreviewBitmaps() {
-        startProgressivePreview()
-    }
     val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        selectedUri = uri
+        selectedImageUri = uri
         Log.i("Picker", "uri=${uri}")
         if (uri != null) {
             try {
@@ -204,15 +199,15 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                     decoder.isMutableRequired = true
                 }
 
-                fullResBitmap = srcBitmap
+                sourceBitmap = srcBitmap
                 // Build initial preview (will use 1MP if display size not known yet)
-                updatePreviewBitmaps()
+                scheduleProgressivePreview()
             } catch (e: Exception) {
                 Log.e("Processor", "Failed to process image", e)
-                previewProcessedBitmap = null
+                previewProcessed = null
             }
         } else {
-            previewProcessedBitmap = null
+            previewProcessed = null
         }
     }
 
@@ -225,34 +220,34 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             }
 
             Button(onClick = {
-            val srcFull = fullResBitmap
+            val srcFull = sourceBitmap
             if (srcFull == null) {
                 Toast.makeText(context, "No image to export", Toast.LENGTH_SHORT).show()
             } else {
-                val sVec = hsvToRgbVectorMaxNormalized(hueS, satS)
-                val tVec = hsvToRgbVectorMaxNormalized(hueT, satT)
-                val gVec = hsvToRgbVectorMaxNormalized(hueG, satG)
-                val sEff = Triple(
-                    2.0.pow(rawS.toDouble() * sVec.first),
-                    2.0.pow(rawS.toDouble() * sVec.second),
-                    2.0.pow(rawS.toDouble() * sVec.third)
+                val sVec = hsvToMaxNormalizedRgb(hueS, satS)
+                val tVec = hsvToMaxNormalizedRgb(hueT, satT)
+                val gVec = hsvToMaxNormalizedRgb(hueG, satG)
+                val scaleS = Triple(
+                    2.0.pow(log2S.toDouble() * sVec.first),
+                    2.0.pow(log2S.toDouble() * sVec.second),
+                    2.0.pow(log2S.toDouble() * sVec.third)
                 )
-                val tEff = Triple(
-                    2.0.pow(rawT.toDouble() * tVec.first),
-                    2.0.pow(rawT.toDouble() * tVec.second),
-                    2.0.pow(rawT.toDouble() * tVec.third)
+                val scaleT = Triple(
+                    2.0.pow(log2T.toDouble() * tVec.first),
+                    2.0.pow(log2T.toDouble() * tVec.second),
+                    2.0.pow(log2T.toDouble() * tVec.third)
                 )
-                val gEff = Triple(
-                    2.0.pow(rawG.toDouble() * gVec.first),
-                    2.0.pow(rawG.toDouble() * gVec.second),
-                    2.0.pow(rawG.toDouble() * gVec.third)
+                val scaleG = Triple(
+                    2.0.pow(log2G.toDouble() * gVec.first),
+                    2.0.pow(log2G.toDouble() * gVec.second),
+                    2.0.pow(log2G.toDouble() * gVec.third)
                 )
-                val processedFull = processBitmapRgbPerChannelSmoothstep(
+                val processedFull = applyPerChannelCdfShaping(
                     srcFull,
-                    heSmoothing.toDouble(),
-                    sEff,
-                    tEff,
-                    gEff
+                    histogramSmoothingAlpha.toDouble(),
+                    scaleS,
+                    scaleT,
+                    scaleG
                 )
                 val filename = "TGE_" + System.currentTimeMillis().toString() + ".jpg"
                 val values = ContentValues().apply {
@@ -291,10 +286,10 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                 .onSizeChanged { sz ->
                     val w = sz.width
                     val h = sz.height
-                    if (w != displayWidthPx || h != displayHeightPx) {
-                        displayWidthPx = w
-                        displayHeightPx = h
-                        if (fullResBitmap != null) updatePreviewBitmaps()
+                    if (w != previewWidthPx || h != previewHeightPx) {
+                        previewWidthPx = w
+                        previewHeightPx = h
+                        if (sourceBitmap != null) scheduleProgressivePreview()
                     }
                 }
                 .pointerInput(Unit) {
@@ -307,26 +302,26 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                     )
                 }
         ) {
-            val bmpToShow = if (showOriginal) previewOriginalBitmap else previewProcessedBitmap
+            val bmpToShow = if (showOriginal) previewOriginal else previewProcessed
             if (bmpToShow != null) {
                 Image(
                     bitmap = bmpToShow.asImageBitmap(),
                     contentDescription = if (showOriginal) "Original image" else "Processed image",
                     modifier = Modifier.fillMaxSize()
                 )
-            } else if (selectedUri != null) {
+            } else if (selectedImageUri != null) {
                 Text("Image selected. Processing failed or pending.")
             }
         }
 
         Row(modifier = Modifier.padding(top = 12.dp)) {
-            Text("HE smoothing")
+            Text("Histogram smoothing")
         }
         Slider(
-            value = heSmoothing,
+            value = histogramSmoothingAlpha,
             onValueChange = { v ->
-                heSmoothing = v
-                updatePreviewBitmaps()
+                histogramSmoothingAlpha = v
+                scheduleProgressivePreview()
             },
             valueRange = 0f..1f
         )
@@ -336,21 +331,21 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             HsvWheel(
                 hue = hueT,
                 saturation = satT,
-                onChange = { h, s ->
+                onHsvChange = { h, s ->
                     hueT = h
                     satT = s
-                    updatePreviewBitmaps()
+                    scheduleProgressivePreview()
                 },
                 modifier = Modifier.padding(end = 12.dp),
                 sizeDp = 120.dp
             )
             Column(modifier = Modifier.weight(1f)) {
-                Text("t (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawT.toDouble())))
+                Text("t (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2T.toDouble())))
                 Slider(
-                    value = rawT,
+                    value = log2T,
                     onValueChange = { v ->
-                        rawT = v
-                        updatePreviewBitmaps()
+                        log2T = v
+                        scheduleProgressivePreview()
                     },
                     valueRange = -2f..2f
                 )
@@ -362,21 +357,21 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             HsvWheel(
                 hue = hueS,
                 saturation = satS,
-                onChange = { h, s ->
+                onHsvChange = { h, s ->
                     hueS = h
                     satS = s
-                    updatePreviewBitmaps()
+                    scheduleProgressivePreview()
                 },
                 modifier = Modifier.padding(end = 12.dp),
                 sizeDp = 120.dp
             )
             Column(modifier = Modifier.weight(1f)) {
-                Text("s (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawS.toDouble())))
+                Text("s (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2S.toDouble())))
                 Slider(
-                    value = rawS,
+                    value = log2S,
                     onValueChange = { v ->
-                        rawS = v
-                        updatePreviewBitmaps()
+                        log2S = v
+                        scheduleProgressivePreview()
                     },
                     valueRange = -2f..2f
                 )
@@ -388,21 +383,21 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
             HsvWheel(
                 hue = hueG,
                 saturation = satG,
-                onChange = { h, s ->
+                onHsvChange = { h, s ->
                     hueG = h
                     satG = s
-                    updatePreviewBitmaps()
+                    scheduleProgressivePreview()
                 },
                 modifier = Modifier.padding(end = 12.dp),
                 sizeDp = 120.dp
             )
             Column(modifier = Modifier.weight(1f)) {
-                Text("g (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawG.toDouble())))
+                Text("g (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2G.toDouble())))
                 Slider(
-                    value = rawG,
+                    value = log2G,
                     onValueChange = { v ->
-                        rawG = v
-                        updatePreviewBitmaps()
+                        log2G = v
+                        scheduleProgressivePreview()
                     },
                     valueRange = -2f..2f
                 )
@@ -415,7 +410,7 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
 private fun HsvWheel(
     hue: Float,
     saturation: Float,
-    onChange: (Float, Float) -> Unit,
+    onHsvChange: (Float, Float) -> Unit,
     modifier: Modifier = Modifier,
     sizeDp: Dp = 200.dp
 ) {
@@ -432,12 +427,12 @@ private fun HsvWheel(
                 if (sizePx <= 0) return@pointerInput
                 detectDragGestures(
                     onDragStart = { offset ->
-                        val (h, s) = hsvFromPosition(offset, sizePx)
-                        onChange(h, s)
+                        val (h, s) = hsvFromWheelPosition(offset, sizePx)
+                        onHsvChange(h, s)
                     },
                     onDrag = { change, _ ->
-                        val (h, s) = hsvFromPosition(change.position, sizePx)
-                        onChange(h, s)
+                        val (h, s) = hsvFromWheelPosition(change.position, sizePx)
+                        onHsvChange(h, s)
                     }
                 )
             }
@@ -464,7 +459,7 @@ private fun HsvWheel(
     }
 }
 
-private fun hsvFromPosition(pos: Offset, sizePx: Int): Pair<Float, Float> {
+private fun hsvFromWheelPosition(pos: Offset, sizePx: Int): Pair<Float, Float> {
     val c = sizePx / 2f
     val dx = pos.x - c
     val dy = pos.y - c
@@ -505,7 +500,7 @@ private fun createHsvWheelBitmap(size: Int): Bitmap {
     return bmp
 }
 
-private fun targetCdf(y: Double, s: Double, t: Double, g: Double): Double {
+private fun computeTargetCdf(y: Double, s: Double, t: Double, g: Double): Double {
     if (y <= 0.0) return 0.0
     if (y >= 1.0) return 1.0
     val a = y.pow(t)
@@ -520,7 +515,7 @@ private fun targetCdf(y: Double, s: Double, t: Double, g: Double): Double {
 }
 
 
-private fun hsvToRgbVectorMaxNormalized(hue: Float, saturation: Float): Triple<Double, Double, Double> {
+private fun hsvToMaxNormalizedRgb(hue: Float, saturation: Float): Triple<Double, Double, Double> {
     val hsv = floatArrayOf(hue, saturation, 1f)
     val color = AndroidColor.HSVToColor(hsv)
     val r = ((color shr 16) and 0xFF) / 255.0
@@ -530,12 +525,12 @@ private fun hsvToRgbVectorMaxNormalized(hue: Float, saturation: Float): Triple<D
     return if (m <= 1e-9) Triple(0.0, 0.0, 0.0) else Triple(r / m, g / m, b / m)
 }
 
-private fun processBitmapRgbPerChannelSmoothstep(
+private fun applyPerChannelCdfShaping(
     srcBitmap: Bitmap,
-    heSmoothing: Double,
-    sEff: Triple<Double, Double, Double>,
-    tEff: Triple<Double, Double, Double>,
-    gEff: Triple<Double, Double, Double>
+    histogramSmoothingAlpha: Double,
+    scaleS: Triple<Double, Double, Double>,
+    scaleT: Triple<Double, Double, Double>,
+    scaleG: Triple<Double, Double, Double>
 ): Bitmap {
     val src8 = Mat()
     Utils.bitmapToMat(srcBitmap, src8)
@@ -589,7 +584,7 @@ private fun processBitmapRgbPerChannelSmoothstep(
         val bins = 1024
         val hist = Mat()
         Imgproc.calcHist(listOf(channel), MatOfInt(0), Mat(), hist, MatOfInt(bins), MatOfFloat(0f, 1f))
-        val alpha = kotlin.math.min(1.0, kotlin.math.max(0.0, heSmoothing))
+        val alpha = kotlin.math.min(1.0, kotlin.math.max(0.0, histogramSmoothingAlpha))
         val totalPix = (channel.rows() * channel.cols()).toDouble()
         val meanCount = totalPix / bins.toDouble()
         val histSmoothed = Mat(hist.rows(), hist.cols(), hist.type())
@@ -624,7 +619,7 @@ private fun processBitmapRgbPerChannelSmoothstep(
         var iBin = 0
         while (iBin < bins) {
             val u = iBin.toDouble() / (bins - 1).toDouble()
-            val y = targetCdf(u, invS, invT, invG)
+            val y = computeTargetCdf(u, invS, invT, invG)
             invRow.put(0, iBin, y)
             iBin++
         }
@@ -641,9 +636,9 @@ private fun processBitmapRgbPerChannelSmoothstep(
         hist.release(); histSmoothed.release(); cdfRow.release(); idx.release(); zeroMap.release(); map.release(); chEq.release(); invRow.release(); idx2.release(); map2.release(); chTarget.release()
     }
 
-    eqAndShapeChannel(ch[0], sEff.first, tEff.first, gEff.first)
-    eqAndShapeChannel(ch[1], sEff.second, tEff.second, gEff.second)
-    eqAndShapeChannel(ch[2], sEff.third, tEff.third, gEff.third)
+    eqAndShapeChannel(ch[0], scaleS.first, scaleT.first, scaleG.first)
+    eqAndShapeChannel(ch[1], scaleS.second, scaleT.second, scaleG.second)
+    eqAndShapeChannel(ch[2], scaleS.third, scaleT.third, scaleG.third)
 
     linearToSrgb(ch[0])
     linearToSrgb(ch[1])
