@@ -59,6 +59,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.pow
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -86,7 +87,10 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
     var wheelHue by remember { mutableStateOf(0f) }
     var wheelSat by remember { mutableStateOf(0f) }
     var heSmoothing by remember { mutableStateOf(0.02f) }
-    var gamma by remember { mutableStateOf(1.0f) }
+    // Histogram specification parameters (raw in [-2,2], effective via exp2)
+    var rawS by remember { mutableStateOf(0f) }
+    var rawT by remember { mutableStateOf(0f) }
+    var rawG by remember { mutableStateOf(0f) }
     var displayWidthPx by remember { mutableStateOf(0) }
     var displayHeightPx by remember { mutableStateOf(0) }
     val context = LocalContext.current
@@ -162,7 +166,10 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                 if (!isActive) break
                 val scaled = Bitmap.createScaledBitmap(src, w, h, true)
                 val weights = if (wheelSat <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(wheelHue, wheelSat)
-                val out = processBitmapLinearLumaSmoothstep(scaled, weights, heSmoothing.toDouble(), gamma.toDouble())
+                val sEff = 2.0.pow(rawS.toDouble())
+                val tEff = 2.0.pow(rawT.toDouble())
+                val gEff = 2.0.pow(rawG.toDouble())
+                val out = processBitmapLinearLumaSmoothstep(scaled, weights, heSmoothing.toDouble(), sEff, tEff, gEff)
                 withContext(Dispatchers.Main) {
                     previewOriginalBitmap = scaled
                     previewProcessedBitmap = out
@@ -213,7 +220,10 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
                 Toast.makeText(context, "No image to export", Toast.LENGTH_SHORT).show()
             } else {
                 val weights = if (wheelSat <= 0f) Triple(0.2126, 0.7152, 0.0722) else hsvToLinearRgbWeights(wheelHue, wheelSat)
-                val processedFull = processBitmapLinearLumaSmoothstep(srcFull, weights, heSmoothing.toDouble(), gamma.toDouble())
+                val sEff = 2.0.pow(rawS.toDouble())
+                val tEff = 2.0.pow(rawT.toDouble())
+                val gEff = 2.0.pow(rawG.toDouble())
+                val processedFull = processBitmapLinearLumaSmoothstep(srcFull, weights, heSmoothing.toDouble(), sEff, tEff, gEff)
                 val filename = "TGE_" + System.currentTimeMillis().toString() + ".jpg"
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, filename)
@@ -304,15 +314,39 @@ private fun PickerScreen(modifier: Modifier = Modifier) {
         )
 
         Row(modifier = Modifier.padding(top = 12.dp)) {
-            Text("Gamma g")
+            Text("t (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawT.toDouble())))
         }
         Slider(
-            value = gamma,
+            value = rawT,
             onValueChange = { v ->
-                gamma = v
+                rawT = v
                 updatePreviewBitmaps()
             },
-            valueRange = 0.2f..3.0f
+            valueRange = -2f..2f
+        )
+
+        Row(modifier = Modifier.padding(top = 12.dp)) {
+            Text("s (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawS.toDouble())))
+        }
+        Slider(
+            value = rawS,
+            onValueChange = { v ->
+                rawS = v
+                updatePreviewBitmaps()
+            },
+            valueRange = -2f..2f
+        )
+
+        Row(modifier = Modifier.padding(top = 12.dp)) {
+            Text("g (raw) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(rawG.toDouble())))
+        }
+        Slider(
+            value = rawG,
+            onValueChange = { v ->
+                rawG = v
+                updatePreviewBitmaps()
+            },
+            valueRange = -2f..2f
         )
     }
 }
@@ -410,6 +444,20 @@ private fun createHsvWheelBitmap(size: Int): Bitmap {
     return bmp
 }
 
+private fun targetCdf(y: Double, s: Double, t: Double, g: Double): Double {
+    if (y <= 0.0) return 0.0
+    if (y >= 1.0) return 1.0
+    val a = y.pow(t)
+    val b = (1.0 - y).pow(s)
+    val frac = if ((a + b) <= 0.0) 0.0 else a / (a + b)
+    val v = frac.pow(g)
+    return when {
+        v < 0.0 -> 0.0
+        v > 1.0 -> 1.0
+        else -> v
+    }
+}
+
 private fun hsvToLinearRgbWeights(hue: Float, saturation: Float): Triple<Double, Double, Double> {
     val hsv = floatArrayOf(hue, saturation, 1f)
     val color = AndroidColor.HSVToColor(hsv)
@@ -431,7 +479,9 @@ private fun processBitmapLinearLumaSmoothstep(
     srcBitmap: Bitmap,
     weights: Triple<Double, Double, Double>,
     heSmoothing: Double,
-    gamma: Double
+    sEff: Double,
+    tEff: Double,
+    gEff: Double
 ): Bitmap {
     val src8 = Mat()
     Utils.bitmapToMat(srcBitmap, src8)
@@ -499,14 +549,30 @@ private fun processBitmapLinearLumaSmoothstep(
 	Core.merge(listOf(idx, zeroMap), map)
     val lumEqF = Mat(lum.rows(), lum.cols(), CvType.CV_32FC1)
     Imgproc.remap(cdfRow, lumEqF, map, Mat(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE, Scalar(0.0))
-    // Apply target CDF via inverse: y = G^{-1}(u). For power CDF G(y)=y^g, use y = u^(1/gamma)
-    Core.pow(lumEqF, 1.0 / gamma, lumEqF)
+    // Approximate inverse by flipping raw signs: use inverse-effective params 1/s, 1/t, 1/g
+    val invS = 1.0 / sEff
+    val invT = 1.0 / tEff
+    val invG = 1.0 / gEff
+    val invRow = Mat(1, bins, CvType.CV_32FC1)
+    var iBin = 0
+    while (iBin < bins) {
+        val u = iBin.toDouble() / (bins - 1).toDouble()
+        val y = targetCdf(u, invS, invT, invG)
+        invRow.put(0, iBin, y)
+        iBin++
+    }
+    val idx2 = Mat()
+    Core.multiply(lumEqF, Scalar((bins - 1).toDouble()), idx2)
+    val map2 = Mat()
+    Core.merge(listOf(idx2, zeroMap), map2)
+    val lumTargetF = Mat(lum.rows(), lum.cols(), CvType.CV_32FC1)
+    Imgproc.remap(invRow, lumTargetF, map2, Mat(), Imgproc.INTER_LINEAR, Core.BORDER_REPLICATE, Scalar(0.0))
     // Scale RGB (linear) to match equalized luminance
     val eps = 1e-6
     val denom = Mat()
     Core.add(lum, Scalar(eps), denom)
     val scale = Mat()
-    Core.divide(lumEqF, denom, scale)
+    Core.divide(lumTargetF, denom, scale)
     Core.multiply(ch[0], scale, ch[0])
     Core.multiply(ch[1], scale, ch[1])
     Core.multiply(ch[2], scale, ch[2])
@@ -547,7 +613,7 @@ private fun processBitmapLinearLumaSmoothstep(
     srcF.convertTo(out8, CvType.CV_8UC4, 255.0)
     val outBitmap = Bitmap.createBitmap(srcBitmap.width, srcBitmap.height, Bitmap.Config.ARGB_8888)
     Utils.matToBitmap(out8, outBitmap)
-    src8.release(); srcF.release(); out8.release(); lum.release(); idx.release(); zeroMap.release(); map.release(); lumEqF.release(); hist.release(); histSmoothed.release(); cdfRow.release(); denom.release(); scale.release()
+    src8.release(); srcF.release(); out8.release(); lum.release(); idx.release(); zeroMap.release(); map.release(); lumEqF.release(); hist.release(); histSmoothed.release(); cdfRow.release(); denom.release(); scale.release(); invRow.release(); idx2.release(); map2.release(); lumTargetF.release()
     return outBitmap
 }
 
