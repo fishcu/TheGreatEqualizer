@@ -33,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
@@ -148,35 +149,18 @@ private fun ImageEqualizerScreen(modifier: Modifier = Modifier) {
         val src = sourceBitmap ?: return
         val (topW, topH) = computePreviewTargetSize(src, previewWidthPx, previewHeightPx)
         val sizes = computeProgressivePreviewSizes(src.width, src.height, topW, topH)
+        val scales = computeChannelScales(hueS, satS, log2S, hueT, satT, log2T, hueG, satG, log2G)
         previewJob?.cancel()
         previewJob = scope.launch(Dispatchers.Default) {
             for ((w, h) in sizes) {
                 if (!isActive) break
                 val scaled = Bitmap.createScaledBitmap(src, w, h, true)
-                val sVec = hsvToMaxNormalizedRgb(hueS, satS)
-                val tVec = hsvToMaxNormalizedRgb(hueT, satT)
-                val gVec = hsvToMaxNormalizedRgb(hueG, satG)
-                val scaleS = Triple(
-                    2.0.pow(log2S.toDouble() * sVec.first),
-                    2.0.pow(log2S.toDouble() * sVec.second),
-                    2.0.pow(log2S.toDouble() * sVec.third)
-                )
-                val scaleT = Triple(
-                    2.0.pow(log2T.toDouble() * tVec.first),
-                    2.0.pow(log2T.toDouble() * tVec.second),
-                    2.0.pow(log2T.toDouble() * tVec.third)
-                )
-                val scaleG = Triple(
-                    2.0.pow(log2G.toDouble() * gVec.first),
-                    2.0.pow(log2G.toDouble() * gVec.second),
-                    2.0.pow(log2G.toDouble() * gVec.third)
-                )
                 val out = applyPerChannelCdfShaping(
                     scaled,
                     histogramSmoothingAlpha.toDouble(),
-                    scaleS,
-                    scaleT,
-                    scaleG
+                    scales.s,
+                    scales.t,
+                    scales.g
                 )
                 withContext(Dispatchers.Main) {
                     previewOriginal = scaled
@@ -314,6 +298,12 @@ private fun ImageEqualizerScreen(modifier: Modifier = Modifier) {
             }
         }
 
+        DisposableEffect(Unit) {
+            onDispose {
+                previewJob?.cancel()
+            }
+        }
+
         Row(modifier = Modifier.padding(top = 12.dp)) {
             Text("Histogram smoothing")
         }
@@ -327,82 +317,55 @@ private fun ImageEqualizerScreen(modifier: Modifier = Modifier) {
         )
 
         // t controls with its HSV wheel
-        Row(modifier = Modifier.padding(top = 12.dp)) {
-            HsvWheel(
-                hue = hueT,
-                saturation = satT,
-                onHsvChange = { h, s ->
-                    hueT = h
-                    satT = s
-                    scheduleProgressivePreview()
-                },
-                modifier = Modifier.padding(end = 12.dp),
-                sizeDp = 120.dp
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text("t (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2T.toDouble())))
-                Slider(
-                    value = log2T,
-                    onValueChange = { v ->
-                        log2T = v
-                        scheduleProgressivePreview()
-                    },
-                    valueRange = -2f..2f
-                )
+        ParamControl(
+            label = "t",
+            hue = hueT,
+            saturation = satT,
+            onHsvChange = { h, s ->
+                hueT = h
+                satT = s
+                scheduleProgressivePreview()
+            },
+            log2Value = log2T,
+            onLog2Change = { v ->
+                log2T = v
+                scheduleProgressivePreview()
             }
-        }
+        )
 
         // s controls with its HSV wheel
-        Row(modifier = Modifier.padding(top = 12.dp)) {
-            HsvWheel(
-                hue = hueS,
-                saturation = satS,
-                onHsvChange = { h, s ->
-                    hueS = h
-                    satS = s
-                    scheduleProgressivePreview()
-                },
-                modifier = Modifier.padding(end = 12.dp),
-                sizeDp = 120.dp
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text("s (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2S.toDouble())))
-                Slider(
-                    value = log2S,
-                    onValueChange = { v ->
-                        log2S = v
-                        scheduleProgressivePreview()
-                    },
-                    valueRange = -2f..2f
-                )
+        ParamControl(
+            label = "s",
+            hue = hueS,
+            saturation = satS,
+            onHsvChange = { h, s ->
+                hueS = h
+                satS = s
+                scheduleProgressivePreview()
+            },
+            log2Value = log2S,
+            onLog2Change = { v ->
+                log2S = v
+                scheduleProgressivePreview()
             }
-        }
+        )
 
         // g controls with its HSV wheel
-        Row(modifier = Modifier.padding(top = 12.dp)) {
-            HsvWheel(
-                hue = hueG,
-                saturation = satG,
-                onHsvChange = { h, s ->
-                    hueG = h
-                    satG = s
-                    scheduleProgressivePreview()
-                },
-                modifier = Modifier.padding(end = 12.dp),
-                sizeDp = 120.dp
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text("g (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2G.toDouble())))
-                Slider(
-                    value = log2G,
-                    onValueChange = { v ->
-                        log2G = v
-                        scheduleProgressivePreview()
-                    },
-                    valueRange = -2f..2f
-                )
+        ParamControl(
+            label = "g",
+            hue = hueG,
+            saturation = satG,
+            onHsvChange = { h, s ->
+                hueG = h
+                satG = s
+                scheduleProgressivePreview()
+            },
+            log2Value = log2G,
+            onLog2Change = { v ->
+                log2G = v
+                scheduleProgressivePreview()
             }
-        }
+        )
     }
 }
 
@@ -459,6 +422,34 @@ private fun HsvWheel(
     }
 }
 
+@Composable
+private fun ParamControl(
+    label: String,
+    hue: Float,
+    saturation: Float,
+    onHsvChange: (Float, Float) -> Unit,
+    log2Value: Float,
+    onLog2Change: (Float) -> Unit
+) {
+    Row(modifier = Modifier.padding(top = 12.dp)) {
+        HsvWheel(
+            hue = hue,
+            saturation = saturation,
+            onHsvChange = onHsvChange,
+            modifier = Modifier.padding(end = 12.dp),
+            sizeDp = 120.dp
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(label + " (log2) [-2,2]  eff=" + String.format("%.3f", 2.0.pow(log2Value.toDouble())))
+            Slider(
+                value = log2Value,
+                onValueChange = { v -> onLog2Change(v) },
+                valueRange = -2f..2f
+            )
+        }
+    }
+}
+
 private fun hsvFromWheelPosition(pos: Offset, sizePx: Int): Pair<Float, Float> {
     val c = sizePx / 2f
     val dx = pos.x - c
@@ -498,6 +489,38 @@ private fun createHsvWheelBitmap(size: Int): Bitmap {
     }
     bmp.setPixels(pixels, 0, size, 0, 0, size, size)
     return bmp
+}
+
+private data class ChannelScales(
+    val s: Triple<Double, Double, Double>,
+    val t: Triple<Double, Double, Double>,
+    val g: Triple<Double, Double, Double>
+)
+
+private fun computeChannelScales(
+    hueS: Float, satS: Float, log2S: Float,
+    hueT: Float, satT: Float, log2T: Float,
+    hueG: Float, satG: Float, log2G: Float
+): ChannelScales {
+    val sVec = hsvToMaxNormalizedRgb(hueS, satS)
+    val tVec = hsvToMaxNormalizedRgb(hueT, satT)
+    val gVec = hsvToMaxNormalizedRgb(hueG, satG)
+    val scaleS = Triple(
+        2.0.pow(log2S.toDouble() * sVec.first),
+        2.0.pow(log2S.toDouble() * sVec.second),
+        2.0.pow(log2S.toDouble() * sVec.third)
+    )
+    val scaleT = Triple(
+        2.0.pow(log2T.toDouble() * tVec.first),
+        2.0.pow(log2T.toDouble() * tVec.second),
+        2.0.pow(log2T.toDouble() * tVec.third)
+    )
+    val scaleG = Triple(
+        2.0.pow(log2G.toDouble() * gVec.first),
+        2.0.pow(log2G.toDouble() * gVec.second),
+        2.0.pow(log2G.toDouble() * gVec.third)
+    )
+    return ChannelScales(scaleS, scaleT, scaleG)
 }
 
 private fun computeTargetCdf(y: Double, s: Double, t: Double, g: Double): Double {
