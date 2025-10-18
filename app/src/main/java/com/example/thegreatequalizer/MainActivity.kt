@@ -559,49 +559,63 @@ private fun applyPerChannelCdfShaping(
     Utils.bitmapToMat(srcBitmap, src8)
     val srcF = Mat()
     src8.convertTo(srcF, CvType.CV_32FC4, 1.0 / 255.0)
-    val ch = ArrayList<Mat>(4)
-    Core.split(srcF, ch)
+    // Extract RGB as a 3-channel float Mat
+    val rgb = Mat(srcF.rows(), srcF.cols(), CvType.CV_32FC3)
+    Core.mixChannels(listOf(srcF), listOf(rgb), MatOfInt(0, 0, 1, 1, 2, 2))
 
-    fun srgbToLinear(channel: Mat) {
+    fun srgbToLinearVec(rgbIn: Mat): Mat {
+        val thr = Mat(rgbIn.rows(), rgbIn.cols(), rgbIn.type(), Scalar(0.04045, 0.04045, 0.04045))
+        val mask8 = Mat()
+        Core.compare(rgbIn, thr, mask8, Core.CMP_GT)
         val mask = Mat()
-        val thr = Mat(channel.rows(), channel.cols(), channel.type(), Scalar(0.04045))
-        Core.compare(channel, thr, mask, Core.CMP_LE)
+        mask8.convertTo(mask, CvType.CV_32FC3, 1.0 / 255.0)
+        val oneMinusMask = Mat()
+        Core.subtract(Mat(rgbIn.rows(), rgbIn.cols(), rgbIn.type(), Scalar(1.0, 1.0, 1.0)), mask, oneMinusMask)
         val low = Mat()
-        Core.divide(channel, Scalar(12.92), low)
+        Core.divide(rgbIn, Scalar(12.92, 12.92, 12.92), low)
         val highTmp = Mat()
-        Core.add(channel, Scalar(0.055), highTmp)
-        Core.divide(highTmp, Scalar(1.055), highTmp)
+        Core.add(rgbIn, Scalar(0.055, 0.055, 0.055), highTmp)
+        Core.divide(highTmp, Scalar(1.055, 1.055, 1.055), highTmp)
         Core.pow(highTmp, 2.4, highTmp)
-        low.copyTo(channel, mask)
-        val invMask = Mat()
-        val zero = Mat(mask.rows(), mask.cols(), mask.type(), Scalar(0.0))
-        Core.compare(mask, zero, invMask, Core.CMP_EQ)
-        highTmp.copyTo(channel, invMask)
-        mask.release(); thr.release(); low.release(); highTmp.release(); invMask.release(); zero.release()
+        val lowPart = Mat(); val highPart = Mat()
+        Core.multiply(low, oneMinusMask, lowPart)
+        Core.multiply(highTmp, mask, highPart)
+        val out = Mat()
+        Core.add(lowPart, highPart, out)
+        thr.release(); mask8.release(); mask.release(); oneMinusMask.release(); low.release(); highTmp.release(); lowPart.release(); highPart.release()
+        return out
     }
 
-    fun linearToSrgb(channel: Mat) {
+    fun linearToSrgbVec(rgbLinearIn: Mat): Mat {
+        val thr = Mat(rgbLinearIn.rows(), rgbLinearIn.cols(), rgbLinearIn.type(), Scalar(0.0031308, 0.0031308, 0.0031308))
+        val mask8 = Mat()
+        Core.compare(rgbLinearIn, thr, mask8, Core.CMP_GT)
         val mask = Mat()
-        val thr = Mat(channel.rows(), channel.cols(), channel.type(), Scalar(0.0031308))
-        Core.compare(channel, thr, mask, Core.CMP_LE)
+        mask8.convertTo(mask, CvType.CV_32FC3, 1.0 / 255.0)
+        val oneMinusMask = Mat()
+        Core.subtract(Mat(rgbLinearIn.rows(), rgbLinearIn.cols(), rgbLinearIn.type(), Scalar(1.0, 1.0, 1.0)), mask, oneMinusMask)
         val low = Mat()
-        Core.multiply(channel, Scalar(12.92), low)
+        Core.multiply(rgbLinearIn, Scalar(12.92, 12.92, 12.92), low)
         val highTmp = Mat()
-        Core.pow(channel, 1.0 / 2.4, highTmp)
-        Core.multiply(highTmp, Scalar(1.055), highTmp)
-        Core.subtract(highTmp, Scalar(0.055), highTmp)
-        low.copyTo(channel, mask)
-        val invMask = Mat()
-        val zero = Mat(mask.rows(), mask.cols(), mask.type(), Scalar(0.0))
-        Core.compare(mask, zero, invMask, Core.CMP_EQ)
-        highTmp.copyTo(channel, invMask)
-        mask.release(); thr.release(); low.release(); highTmp.release(); invMask.release(); zero.release()
+        Core.pow(rgbLinearIn, 1.0 / 2.4, highTmp)
+        Core.multiply(highTmp, Scalar(1.055, 1.055, 1.055), highTmp)
+        Core.subtract(highTmp, Scalar(0.055, 0.055, 0.055), highTmp)
+        val lowPart = Mat(); val highPart = Mat()
+        Core.multiply(low, oneMinusMask, lowPart)
+        Core.multiply(highTmp, mask, highPart)
+        val out = Mat()
+        Core.add(lowPart, highPart, out)
+        thr.release(); mask8.release(); mask.release(); oneMinusMask.release(); low.release(); highTmp.release(); lowPart.release(); highPart.release()
+        return out
     }
 
-    // Work in linear light
-    srgbToLinear(ch[0])
-    srgbToLinear(ch[1])
-    srgbToLinear(ch[2])
+    fun clampRgb01Vec(rgbInOut: Mat) {
+        Core.max(rgbInOut, Scalar(0.0, 0.0, 0.0), rgbInOut)
+        Core.min(rgbInOut, Scalar(1.0, 1.0, 1.0), rgbInOut)
+    }
+
+    // Work in linear light (vectorized across RGB)
+    val rgbLinear = srgbToLinearVec(rgb)
 
     fun eqAndShapeChannel(channel: Mat, s: Double, t: Double, g: Double) {
         val bins = 1024
@@ -659,23 +673,24 @@ private fun applyPerChannelCdfShaping(
         hist.release(); histSmoothed.release(); cdfRow.release(); idx.release(); zeroMap.release(); map.release(); chEq.release(); invRow.release(); idx2.release(); map2.release(); chTarget.release()
     }
 
-    eqAndShapeChannel(ch[0], scaleS.first, scaleT.first, scaleG.first)
-    eqAndShapeChannel(ch[1], scaleS.second, scaleT.second, scaleG.second)
-    eqAndShapeChannel(ch[2], scaleS.third, scaleT.third, scaleG.third)
+    val rgbCh = ArrayList<Mat>(3)
+    Core.split(rgbLinear, rgbCh)
+    val sVals = arrayOf(scaleS.first, scaleS.second, scaleS.third)
+    val tVals = arrayOf(scaleT.first, scaleT.second, scaleT.third)
+    val gVals = arrayOf(scaleG.first, scaleG.second, scaleG.third)
+    for (i in 0..2) {
+        eqAndShapeChannel(rgbCh[i], sVals[i], tVals[i], gVals[i])
+    }
+    val rgbLinearEq = Mat()
+    Core.merge(rgbCh, rgbLinearEq)
+    rgbCh.forEach { it.release() }
 
-    linearToSrgb(ch[0])
-    linearToSrgb(ch[1])
-    linearToSrgb(ch[2])
+    val rgbSrgb = linearToSrgbVec(rgbLinearEq)
+    clampRgb01Vec(rgbSrgb)
 
-    Core.max(ch[0], Scalar(0.0), ch[0])
-    Core.min(ch[0], Scalar(1.0), ch[0])
-    Core.max(ch[1], Scalar(0.0), ch[1])
-    Core.min(ch[1], Scalar(1.0), ch[1])
-    Core.max(ch[2], Scalar(0.0), ch[2])
-    Core.min(ch[2], Scalar(1.0), ch[2])
-
-    Core.merge(ch, srcF)
-    ch.forEach { it.release() }
+    // Write RGB back into srcF, preserving alpha
+    Core.mixChannels(listOf(rgbSrgb), listOf(srcF), MatOfInt(0, 0, 1, 1, 2, 2))
+    rgb.release(); rgbLinear.release(); rgbLinearEq.release(); rgbSrgb.release()
 
     val out8 = Mat()
     srcF.convertTo(out8, CvType.CV_8UC4, 255.0)
