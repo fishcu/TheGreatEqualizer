@@ -24,4 +24,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "The Great Equalizer"
 include(":app")
-include(":opencv")
