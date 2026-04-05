@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import matplotlib.figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,25 +25,39 @@ from PySide6.QtWidgets import (
 )
 
 
-def cv_to_qimage(img: np.ndarray) -> QImage:
+def bgr_to_qimage(img: np.ndarray) -> QImage:
     """Convert a BGR uint8 numpy array to QImage."""
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     h, w, ch = rgb.shape
     return QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
 
 
-def compute_histograms(img: np.ndarray) -> list[np.ndarray]:
-    """Return per-channel histograms (B, G, R) as 1-D arrays."""
-    return [
-        np.histogram(img[:, :, ch], bins=256, range=(0, 256))[0].astype(np.float64)
-        for ch in range(3)
-    ]
+def compute_target_cdf(
+    x: np.ndarray,
+    t: float,
+    s: float,
+    c: float,
+    g: float,
+    black: float,
+    white: float,
+) -> np.ndarray:
+    """Evaluate the parametric target CDF at positions *x* (in [0, 1]).
 
+    The inner curve h(x) is a piecewise power function joined at *c*,
+    shaped by *t* (shadow exponent) and *s* (highlight exponent), with
+    continuity ensured by the alpha/beta weighting.  The final curve
+    is h(x)**g, linearly mapped from [0,1] to [black, white] and clamped.
+    """
+    alpha = s * c / (s * c + t * (1.0 - c))
+    beta = 1.0 - alpha
 
-def process(src: np.ndarray, param_a: float, param_b: float) -> np.ndarray:
-    """Placeholder – replace with real processing later."""
-    _ = param_a, param_b
-    return src.copy()
+    h = np.where(
+        x <= c,
+        alpha * np.power(x / c, t),
+        1.0 - beta * np.power((1.0 - x) / (1.0 - c), s),
+    )
+    f = np.power(h, g)
+    return np.clip(black + f * (white - black), 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +78,7 @@ class ImageViewer(QMainWindow):
         self._pixmap = QPixmap()
 
     def show_image(self, img: np.ndarray) -> None:
-        self._pixmap = QPixmap.fromImage(cv_to_qimage(img))
+        self._pixmap = QPixmap.fromImage(bgr_to_qimage(img))
         self._refresh()
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -93,21 +107,25 @@ class DebugPlot(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Debug")
-        self._fig = matplotlib.figure.Figure(figsize=(6, 3), tight_layout=True)
+        self._fig = matplotlib.figure.Figure(figsize=(5, 5), tight_layout=True)
         self._ax = self._fig.add_subplot(111)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self.setCentralWidget(self._canvas)
-        self._bins = np.arange(256)
+        self._x = np.linspace(0.0, 1.0, 1024)
 
-    def update_histograms(self, histograms: list[np.ndarray]) -> None:
+    def update_cdf(
+        self, t: float, s: float, c: float, g: float, black: float, white: float
+    ) -> None:
+        y = compute_target_cdf(self._x, t, s, c, g, black, white)
         ax = self._ax
         ax.clear()
-        colors = ["red", "green", "blue"]
-        for hist, color in zip(histograms, colors):
-            ax.plot(self._bins, hist, color=color, linewidth=0.8, alpha=0.7)
-        ax.set_xlim(0, 255)
-        ax.set_ylabel("count")
-        ax.set_xlabel("intensity")
+        ax.plot(self._x, y, color="black", linewidth=1.2)
+        ax.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
+        ax.set_xlabel("input")
+        ax.set_ylabel("output")
         self._canvas.draw_idle()
 
 
@@ -128,6 +146,7 @@ class LabeledSlider(QWidget):
         self._min = min_val
         self._max = max_val
         self._steps = steps
+        self._default = default
 
         self._name_label = QLabel(name)
         self._value_label = QLabel()
@@ -136,6 +155,7 @@ class LabeledSlider(QWidget):
         self._slider.setValue(self._float_to_tick(default))
         self._update_value_label(self._slider.value())
         self._slider.valueChanged.connect(self._on_changed)
+        self._slider.installEventFilter(self)
 
         row = QHBoxLayout()
         row.addWidget(self._name_label)
@@ -157,6 +177,12 @@ class LabeledSlider(QWidget):
     def _update_value_label(self, tick: int) -> None:
         self._value_label.setText(f"{self._tick_to_float(tick):.3f}")
 
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self._slider and event.type() == QEvent.Type.MouseButtonDblClick:
+            self._slider.setValue(self._float_to_tick(self._default))
+            return True
+        return super().eventFilter(obj, event)
+
     def _on_changed(self, tick: int) -> None:
         self._update_value_label(tick)
         self.value_changed.emit(self._tick_to_float(tick))
@@ -172,15 +198,17 @@ class ControlsPanel(QWidget):
         self.setWindowTitle("Controls")
 
         layout = QVBoxLayout()
-        self.param_a = LabeledSlider("param_a", 0.0, 1.0, 0.5)
-        self.param_b = LabeledSlider("param_b", 0.0, 1.0, 0.5)
-        layout.addWidget(self.param_a)
-        layout.addWidget(self.param_b)
+        self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
+        self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
+        self.c = LabeledSlider("c", 0.0, 1.0, 0.5)
+        self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
+        self.black = LabeledSlider("black", -0.2, 0.2, 0.0)
+        self.white = LabeledSlider("white", 0.8, 1.2, 1.0)
+        for slider in (self.t, self.s, self.c, self.g, self.black, self.white):
+            layout.addWidget(slider)
+            slider.value_changed.connect(lambda _: self.params_changed.emit())
         layout.addStretch()
         self.setLayout(layout)
-
-        self.param_a.value_changed.connect(lambda _: self.params_changed.emit())
-        self.param_b.value_changed.connect(lambda _: self.params_changed.emit())
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +230,7 @@ class App:
         self.viewer.resize(default_w, default_h)
         self.viewer.move(screen.x() + margin, screen.y() + margin)
 
-        ctrl_w, ctrl_h = 420, 130
+        ctrl_w, ctrl_h = 420, 230
         self.controls = ControlsPanel()
         self.controls.resize(ctrl_w, ctrl_h)
         self.controls.move(
@@ -226,13 +254,15 @@ class App:
         self._update()
 
     def _update(self) -> None:
-        out = process(
-            self._src,
-            self.controls.param_a.val,
-            self.controls.param_b.val,
+        self.viewer.show_image(self._src)
+        self.debug_plot.update_cdf(
+            self.controls.t.val,
+            self.controls.s.val,
+            self.controls.c.val,
+            self.controls.g.val,
+            self.controls.black.val,
+            self.controls.white.val,
         )
-        self.viewer.show_image(out)
-        self.debug_plot.update_histograms(compute_histograms(out))
 
 
 def main() -> None:
