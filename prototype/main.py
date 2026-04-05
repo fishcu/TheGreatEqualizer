@@ -149,14 +149,14 @@ class ImageViewer(QMainWindow):
 
 
 class HistogramPlot(QMainWindow):
-    """Window showing input histograms before and after capping (stacked)."""
+    """Window with raw and capped histograms stacked vertically."""
 
     COLORS = ["blue", "green", "red"]  # BGR channel order
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Input Histogram")
-        self._fig = matplotlib.figure.Figure(figsize=(6, 5), tight_layout=True)
+        self.setWindowTitle("Histograms")
+        self._fig = matplotlib.figure.Figure(figsize=(6, 4), tight_layout=True)
         self._ax_raw, self._ax_cap = self._fig.subplots(2, 1, sharex=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self.setCentralWidget(self._canvas)
@@ -181,31 +181,58 @@ class HistogramPlot(QMainWindow):
         self._canvas.draw_idle()
 
 
-class DebugPlot(QMainWindow):
-    """Separate window with a matplotlib figure for debug visualizations."""
+class CdfPlot(QMainWindow):
+    """Window with input CDF and target CDF side by side."""
+
+    COLORS = ["blue", "green", "red"]
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Debug")
-        self._fig = matplotlib.figure.Figure(figsize=(5, 5), tight_layout=True)
-        self._ax = self._fig.add_subplot(111)
+        self.setWindowTitle("CDFs")
+        self._fig = matplotlib.figure.Figure(figsize=(8, 4), tight_layout=True)
+        self._ax_in, self._ax_tgt = self._fig.subplots(1, 2)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self.setCentralWidget(self._canvas)
-        self._x = np.linspace(0.0, 1.0, 1024)
+        self._hist_bins = np.linspace(0.0, 1.0, NUM_BINS)
+        self._cdf_x = np.linspace(0.0, 1.0, 1024)
 
-    def update_cdf(
-        self, t: float, s: float, c: float, g: float, black: float, white: float
+    def update(
+        self,
+        capped_hists: list[np.ndarray],
+        t: float,
+        s: float,
+        c: float,
+        g: float,
+        black: float,
+        white: float,
     ) -> None:
-        y = compute_target_cdf(self._x, t, s, c, g, black, white)
-        ax = self._ax
-        ax.clear()
-        ax.plot(self._x, y, color="black", linewidth=1.2)
-        ax.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.set_aspect("equal")
-        ax.set_xlabel("input")
-        ax.set_ylabel("output")
+        ax_in = self._ax_in
+        ax_in.clear()
+        for hist, color in zip(capped_hists, self.COLORS):
+            cdf = np.cumsum(hist)
+            total = cdf[-1]
+            if total > 0:
+                cdf /= total
+            ax_in.plot(self._hist_bins, cdf, color=color, linewidth=0.8, alpha=0.7)
+        ax_in.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
+        ax_in.set_xlim(0, 1)
+        ax_in.set_ylim(0, 1)
+        ax_in.set_aspect("equal")
+        ax_in.set_xlabel("intensity")
+        ax_in.set_ylabel("CDF")
+        ax_in.set_title("Input CDF", fontsize=9)
+
+        ax_tgt = self._ax_tgt
+        ax_tgt.clear()
+        target = compute_target_cdf(self._cdf_x, t, s, c, g, black, white)
+        ax_tgt.plot(self._cdf_x, target, color="black", linewidth=1.4)
+        ax_tgt.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
+        ax_tgt.set_xlim(0, 1)
+        ax_tgt.set_ylim(0, 1)
+        ax_tgt.set_aspect("equal")
+        ax_tgt.set_xlabel("intensity")
+        ax_tgt.set_title("Target CDF", fontsize=9)
+
         self._canvas.draw_idle()
 
 
@@ -321,22 +348,19 @@ class App:
         self.controls.move(right_x, screen.y() + margin)
         self.controls.params_changed.connect(self._update)
 
-        cdf_w, cdf_h = 420, 340
-        self.debug_plot = DebugPlot()
-        self.debug_plot.resize(cdf_w, cdf_h)
-        self.debug_plot.move(right_x, screen.y() + margin + ctrl_h + margin)
-
-        hist_w, hist_h = 500, 400
+        hist_w, hist_h = 500, 350
         self.hist_plot = HistogramPlot()
         self.hist_plot.resize(hist_w, hist_h)
-        self.hist_plot.move(
-            right_x + cdf_w + margin,
-            screen.y() + margin,
-        )
+        self.hist_plot.move(right_x, screen.y() + margin + ctrl_h + margin)
+
+        cdf_w, cdf_h = 500, 300
+        self.cdf_plot = CdfPlot()
+        self.cdf_plot.resize(cdf_w, cdf_h)
+        self.cdf_plot.move(right_x, screen.y() + margin + ctrl_h + margin + hist_h + margin)
 
         self.viewer.show()
-        self.debug_plot.show()
         self.hist_plot.show()
+        self.cdf_plot.show()
         self.controls.show()
 
         self._raw_hists = [
@@ -349,10 +373,11 @@ class App:
         global_max = max(h.max() for h in self._raw_hists)
         cap = cap_frac * global_max
         capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
-        self.hist_plot.update(self._raw_hists, capped_hists)
 
         self.viewer.show_image(self._src_bgr)
-        self.debug_plot.update_cdf(
+        self.hist_plot.update(self._raw_hists, capped_hists)
+        self.cdf_plot.update(
+            capped_hists,
             self.controls.t.val,
             self.controls.s.val,
             self.controls.c.val,
