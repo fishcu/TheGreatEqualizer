@@ -37,3 +37,8 @@ signing.properties
 # Google/Firebase
 google-services.json
 GoogleService-Info.plist
+
+# Prototype test images
+prototype/*.jpg
+prototype/*.jpeg
+prototype/*.png
