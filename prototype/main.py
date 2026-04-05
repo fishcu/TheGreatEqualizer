@@ -32,6 +32,53 @@ def bgr_to_qimage(img: np.ndarray) -> QImage:
     return QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
 
 
+NUM_BINS = 256
+
+
+def compute_histogram(channel: np.ndarray, num_bins: int = NUM_BINS) -> np.ndarray:
+    """Histogram of a single float [0,1] channel. Returns shape (num_bins,)."""
+    return np.histogram(channel, bins=num_bins, range=(0.0, 1.0))[0].astype(np.float64)
+
+
+def cap_histogram(hist: np.ndarray, cap: float) -> np.ndarray:
+    """Cap histogram bins at *cap* and redistribute excess locally.
+
+    Each over-cap bin's excess is spread outward symmetrically, one distance
+    layer at a time.  At each layer, the deposit is split proportionally to
+    available room on each side, so there is no directional bias.
+    """
+    if cap <= 0.0 or hist.max() <= cap:
+        return hist.copy()
+
+    out = hist.astype(np.float64).copy()
+    n = len(out)
+
+    for i in range(n):
+        if out[i] <= cap:
+            continue
+        surplus = out[i] - cap
+        out[i] = cap
+        lo, hi = i - 1, i + 1
+        while surplus > 1e-12 and (lo >= 0 or hi < n):
+            room_lo = (cap - out[lo]) if lo >= 0 and out[lo] < cap else 0.0
+            room_hi = (cap - out[hi]) if hi < n and out[hi] < cap else 0.0
+            total_room = room_lo + room_hi
+            if total_room > 0.0:
+                to_place = min(surplus, total_room)
+                frac_lo = room_lo / total_room
+                deposit_lo = to_place * frac_lo
+                deposit_hi = to_place - deposit_lo
+                if lo >= 0:
+                    out[lo] += deposit_lo
+                if hi < n:
+                    out[hi] += deposit_hi
+                surplus -= to_place
+            lo -= 1
+            hi += 1
+
+    return out
+
+
 def compute_target_cdf(
     x: np.ndarray,
     t: float,
@@ -99,6 +146,39 @@ class ImageViewer(QMainWindow):
             Qt.TransformationMode.SmoothTransformation,
         )
         self._label.setPixmap(scaled)
+
+
+class HistogramPlot(QMainWindow):
+    """Window showing input histograms before and after capping (stacked)."""
+
+    COLORS = ["blue", "green", "red"]  # BGR channel order
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Input Histogram")
+        self._fig = matplotlib.figure.Figure(figsize=(6, 5), tight_layout=True)
+        self._ax_raw, self._ax_cap = self._fig.subplots(2, 1, sharex=True)
+        self._canvas = FigureCanvasQTAgg(self._fig)
+        self.setCentralWidget(self._canvas)
+        self._bins = np.linspace(0.0, 1.0, NUM_BINS)
+
+    def update(
+        self,
+        raw_hists: list[np.ndarray],
+        capped_hists: list[np.ndarray],
+    ) -> None:
+        for ax, hists, title in (
+            (self._ax_raw, raw_hists, "Raw"),
+            (self._ax_cap, capped_hists, "Capped"),
+        ):
+            ax.clear()
+            for hist, color in zip(hists, self.COLORS):
+                ax.plot(self._bins, hist, color=color, linewidth=0.7, alpha=0.7)
+            ax.set_xlim(0, 1)
+            ax.set_ylabel("count")
+            ax.set_title(title, fontsize=9)
+        self._ax_cap.set_xlabel("intensity")
+        self._canvas.draw_idle()
 
 
 class DebugPlot(QMainWindow):
@@ -198,13 +278,16 @@ class ControlsPanel(QWidget):
         self.setWindowTitle("Controls")
 
         layout = QVBoxLayout()
+        self.cap_frac = LabeledSlider("cap", 0.0, 1.0, 1.0)
         self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
         self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
         self.c = LabeledSlider("c", 0.0, 1.0, 0.5)
         self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
         self.black = LabeledSlider("black", -0.2, 0.2, 0.0)
         self.white = LabeledSlider("white", 0.8, 1.2, 1.0)
-        for slider in (self.t, self.s, self.c, self.g, self.black, self.white):
+        for slider in (
+            self.cap_frac, self.t, self.s, self.c, self.g, self.black, self.white,
+        ):
             layout.addWidget(slider)
             slider.value_changed.connect(lambda _: self.params_changed.emit())
         layout.addStretch()
@@ -217,44 +300,58 @@ class ControlsPanel(QWidget):
 
 
 class App:
-    def __init__(self, src: np.ndarray) -> None:
-        self._src = src
+    def __init__(self, src_bgr: np.ndarray) -> None:
+        self._src_bgr = src_bgr
+        self._src_float = src_bgr.astype(np.float64) / 255.0
 
         screen = QApplication.primaryScreen().availableGeometry()
-        default_w = min(src.shape[1], int(screen.width() * 0.55))
-        default_h = min(src.shape[0], int(screen.height() * 0.65))
+        default_w = min(src_bgr.shape[1], int(screen.width() * 0.55))
+        default_h = min(src_bgr.shape[0], int(screen.height() * 0.65))
 
         margin = 12
+        right_x = screen.x() + margin + default_w + margin
 
         self.viewer = ImageViewer("Output", quit_on_close=True)
         self.viewer.resize(default_w, default_h)
         self.viewer.move(screen.x() + margin, screen.y() + margin)
 
-        ctrl_w, ctrl_h = 420, 230
+        ctrl_w, ctrl_h = 420, 260
         self.controls = ControlsPanel()
         self.controls.resize(ctrl_w, ctrl_h)
-        self.controls.move(
-            screen.x() + margin + default_w + margin,
-            screen.y() + margin,
-        )
+        self.controls.move(right_x, screen.y() + margin)
         self.controls.params_changed.connect(self._update)
 
-        debug_w, debug_h = 620, 340
+        cdf_w, cdf_h = 420, 340
         self.debug_plot = DebugPlot()
-        self.debug_plot.resize(debug_w, debug_h)
-        self.debug_plot.move(
-            screen.x() + margin + default_w + margin,
-            screen.y() + margin + ctrl_h + margin,
+        self.debug_plot.resize(cdf_w, cdf_h)
+        self.debug_plot.move(right_x, screen.y() + margin + ctrl_h + margin)
+
+        hist_w, hist_h = 500, 400
+        self.hist_plot = HistogramPlot()
+        self.hist_plot.resize(hist_w, hist_h)
+        self.hist_plot.move(
+            right_x + cdf_w + margin,
+            screen.y() + margin,
         )
 
         self.viewer.show()
         self.debug_plot.show()
+        self.hist_plot.show()
         self.controls.show()
 
+        self._raw_hists = [
+            compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
+        ]
         self._update()
 
     def _update(self) -> None:
-        self.viewer.show_image(self._src)
+        cap_frac = self.controls.cap_frac.val
+        global_max = max(h.max() for h in self._raw_hists)
+        cap = cap_frac * global_max
+        capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
+        self.hist_plot.update(self._raw_hists, capped_hists)
+
+        self.viewer.show_image(self._src_bgr)
         self.debug_plot.update_cdf(
             self.controls.t.val,
             self.controls.s.val,
