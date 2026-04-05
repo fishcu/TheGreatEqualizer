@@ -107,13 +107,50 @@ def compute_target_cdf(
     return np.clip(black + f * (white - black), 0.0, 1.0)
 
 
+def apply_cdf_transform(
+    src_float: np.ndarray,
+    capped_hists: list[np.ndarray],
+    t: float,
+    s: float,
+    c: float,
+    g: float,
+    black: float,
+    white: float,
+) -> np.ndarray:
+    """Apply histogram specification to each BGR channel independently.
+
+    For each channel: build the input CDF from its capped histogram, invert
+    the parametric target CDF, and compose them into a transfer LUT that is
+    applied to the image via linear interpolation.
+    """
+    out = src_float.copy()
+    bin_centers = np.linspace(0.0, 1.0, NUM_BINS)
+
+    target_x = np.linspace(0.0, 1.0, 4096)
+    target_y = compute_target_cdf(target_x, t, s, c, g, black, white)
+
+    for ch in range(3):
+        input_cdf = np.cumsum(capped_hists[ch])
+        total = input_cdf[-1]
+        if total > 0:
+            input_cdf /= total
+
+        transfer = np.interp(input_cdf, target_y, target_x)
+        out[:, :, ch] = np.interp(src_float[:, :, ch], bin_centers, transfer)
+
+    return np.clip(out, 0.0, 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Widgets
 # ---------------------------------------------------------------------------
 
 
 class ImageViewer(QMainWindow):
-    """Resizable window that displays an image at correct aspect ratio."""
+    """Resizable window that displays an image at correct aspect ratio.
+
+    Supports an alternate image shown while the mouse button is held down.
+    """
 
     def __init__(self, title: str, *, quit_on_close: bool = False) -> None:
         super().__init__()
@@ -123,10 +160,28 @@ class ImageViewer(QMainWindow):
         self._label.setMinimumSize(QSize(160, 120))
         self.setCentralWidget(self._label)
         self._pixmap = QPixmap()
+        self._alt_pixmap = QPixmap()
+        self._showing_alt = False
 
     def show_image(self, img: np.ndarray) -> None:
         self._pixmap = QPixmap.fromImage(bgr_to_qimage(img))
-        self._refresh()
+        if not self._showing_alt:
+            self._refresh()
+
+    def set_alt_image(self, img: np.ndarray) -> None:
+        self._alt_pixmap = QPixmap.fromImage(bgr_to_qimage(img))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if not self._alt_pixmap.isNull():
+            self._showing_alt = True
+            self._refresh()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._showing_alt:
+            self._showing_alt = False
+            self._refresh()
+        super().mouseReleaseEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._quit_on_close:
@@ -138,9 +193,10 @@ class ImageViewer(QMainWindow):
         self._refresh()
 
     def _refresh(self) -> None:
-        if self._pixmap.isNull():
+        active = self._alt_pixmap if self._showing_alt else self._pixmap
+        if active.isNull():
             return
-        scaled = self._pixmap.scaled(
+        scaled = active.scaled(
             self._label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -374,17 +430,22 @@ class App:
         cap = cap_frac * global_max
         capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
 
-        self.viewer.show_image(self._src_bgr)
-        self.hist_plot.update(self._raw_hists, capped_hists)
-        self.cdf_plot.update(
-            capped_hists,
-            self.controls.t.val,
-            self.controls.s.val,
-            self.controls.c.val,
-            self.controls.g.val,
-            self.controls.black.val,
-            self.controls.white.val,
+        t = self.controls.t.val
+        s = self.controls.s.val
+        c = self.controls.c.val
+        g = self.controls.g.val
+        black = self.controls.black.val
+        white = self.controls.white.val
+
+        out_float = apply_cdf_transform(
+            self._src_float, capped_hists, t, s, c, g, black, white,
         )
+        out_bgr = (out_float * 255.0).astype(np.uint8)
+
+        self.viewer.show_image(out_bgr)
+        self.viewer.set_alt_image(self._src_bgr)
+        self.hist_plot.update(self._raw_hists, capped_hists)
+        self.cdf_plot.update(capped_hists, t, s, c, g, black, white)
 
 
 def main() -> None:
