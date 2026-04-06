@@ -38,6 +38,9 @@ signing.properties
 google-services.json
 GoogleService-Info.plist
 
+# Python
+__pycache__/
+
 # Prototype test images
 prototype/*.jpg
 prototype/*.jpeg
