@@ -13,12 +13,14 @@ import numpy as np
 import matplotlib.figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6.QtCore import Qt, Signal, QSize, QEvent
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QLabel,
     QMainWindow,
+    QPushButton,
     QSlider,
     QVBoxLayout,
     QHBoxLayout,
@@ -121,26 +123,29 @@ def compute_target_cdf(
 def apply_cdf_transform(
     src_float: np.ndarray,
     capped_hists: list[np.ndarray],
-    t: float,
-    s: float,
-    c: float,
-    g: float,
-    black: float,
-    white: float,
+    t: tuple[float, float, float],
+    s: tuple[float, float, float],
+    c: tuple[float, float, float],
+    g: tuple[float, float, float],
+    black: tuple[float, float, float],
+    white: tuple[float, float, float],
 ) -> np.ndarray:
     """Apply histogram specification to each BGR channel independently.
 
-    For each channel: build the input CDF from its capped histogram, invert
-    the parametric target CDF, and compose them into a transfer LUT that is
-    applied to the image via linear interpolation.
+    Parameters are 3-tuples (one value per BGR channel).  For each channel:
+    build the input CDF from its capped histogram, invert the parametric
+    target CDF, and compose them into a transfer LUT that is applied to the
+    image via linear interpolation.
     """
     out = src_float.copy()
     bin_centers = np.linspace(0.0, 1.0, NUM_BINS)
-
     target_x = np.linspace(0.0, 1.0, 4096)
-    target_y = compute_target_cdf(target_x, t, s, c, g, black, white)
 
     for ch in range(3):
+        target_y = compute_target_cdf(
+            target_x, t[ch], s[ch], c[ch], g[ch], black[ch], white[ch],
+        )
+
         input_cdf = np.cumsum(capped_hists[ch])
         total = input_cdf[-1]
         if total > 0:
@@ -267,12 +272,12 @@ class CdfPlot(QMainWindow):
     def update(
         self,
         capped_hists: list[np.ndarray],
-        t: float,
-        s: float,
-        c: float,
-        g: float,
-        black: float,
-        white: float,
+        t: tuple[float, float, float],
+        s: tuple[float, float, float],
+        c: tuple[float, float, float],
+        g: tuple[float, float, float],
+        black: tuple[float, float, float],
+        white: tuple[float, float, float],
     ) -> None:
         ax_in = self._ax_in
         ax_in.clear()
@@ -293,8 +298,12 @@ class CdfPlot(QMainWindow):
 
         ax_tgt = self._ax_tgt
         ax_tgt.clear()
-        target = compute_target_cdf(self._cdf_x, t, s, c, g, black, white)
-        ax_tgt.plot(self._cdf_x, target, color="black", linewidth=1.4)
+        for ch, color in enumerate(self.COLORS):
+            target = compute_target_cdf(
+                self._cdf_x, t[ch], s[ch], c[ch], g[ch], black[ch], white[ch],
+            )
+            ax_tgt.plot(self._cdf_x, target, color=color,
+                        linewidth=1.0, alpha=0.8)
         ax_tgt.plot([0, 1], [0, 1], color="gray",
                     linewidth=0.5, linestyle="--")
         ax_tgt.set_xlim(0, 1)
@@ -304,6 +313,47 @@ class CdfPlot(QMainWindow):
         ax_tgt.set_title("Target CDF", fontsize=9)
 
         self._canvas.draw_idle()
+
+
+class ColorButton(QPushButton):
+    """Small color swatch that opens QColorDialog on click.
+
+    Stores the picked color as an RGB tuple normalized so the maximum
+    component equals 1.0 (i.e. the "tint direction").
+    """
+
+    color_changed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._rgb = (1.0, 1.0, 1.0)
+        self.setFixedSize(24, 24)
+        self._refresh_style()
+        self.clicked.connect(self._pick_color)
+
+    @property
+    def rgb(self) -> tuple[float, float, float]:
+        return self._rgb
+
+    def _refresh_style(self) -> None:
+        r, g, b = (int(v * 255) for v in self._rgb)
+        self.setStyleSheet(
+            f"ColorButton {{ background-color: rgb({r},{g},{b}); border: 1px solid #888; }}"
+        )
+
+    def _pick_color(self) -> None:
+        r, g, b = (int(v * 255) for v in self._rgb)
+        chosen = QColorDialog.getColor(QColor(r, g, b), self)
+        if not chosen.isValid():
+            return
+        rf, gf, bf = chosen.redF(), chosen.greenF(), chosen.blueF()
+        m = max(rf, gf, bf)
+        if m < 1e-9:
+            self._rgb = (1.0, 1.0, 1.0)
+        else:
+            self._rgb = (rf / m, gf / m, bf / m)
+        self._refresh_style()
+        self.color_changed.emit()
 
 
 class LabeledSlider(QWidget):
@@ -382,17 +432,40 @@ class ControlsPanel(QWidget):
         self.linear_check.toggled.connect(self.linear_changed.emit)
 
         self.cap_frac = LabeledSlider("cap", 0.0, 1.0, 1.0)
+        layout.addWidget(self.cap_frac)
+        self.cap_frac.value_changed.connect(
+            lambda _: self.params_changed.emit())
+
         self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
         self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
         self.c = LabeledSlider("c", 0.0, 1.0, 0.5)
         self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
         self.black = LabeledSlider("black", -0.2, 0.2, 0.0)
         self.white = LabeledSlider("white", 0.8, 1.2, 1.0)
-        for slider in (
-            self.cap_frac, self.t, self.s, self.c, self.g, self.black, self.white,
+
+        self.color_t = ColorButton()
+        self.color_s = ColorButton()
+        self.color_c = ColorButton()
+        self.color_g = ColorButton()
+        self.color_black = ColorButton()
+        self.color_white = ColorButton()
+
+        for slider, cbtn in (
+            (self.t, self.color_t),
+            (self.s, self.color_s),
+            (self.c, self.color_c),
+            (self.g, self.color_g),
+            (self.black, self.color_black),
+            (self.white, self.color_white),
         ):
-            layout.addWidget(slider)
+            row = QHBoxLayout()
+            row.addWidget(slider, stretch=1)
+            row.addWidget(cbtn)
+            row.setContentsMargins(0, 0, 0, 0)
+            layout.addLayout(row)
             slider.value_changed.connect(lambda _: self.params_changed.emit())
+            cbtn.color_changed.connect(self.params_changed.emit)
+
         layout.addStretch()
         self.setLayout(layout)
 
@@ -419,7 +492,7 @@ class App:
         self.viewer.resize(default_w, default_h)
         self.viewer.move(screen.x() + margin, screen.y() + margin)
 
-        ctrl_w, ctrl_h = 420, 290
+        ctrl_w, ctrl_h = 420, 320
         self.controls = ControlsPanel()
         self.controls.resize(ctrl_w, ctrl_h)
         self.controls.move(right_x, screen.y() + margin)
@@ -457,23 +530,31 @@ class App:
         ]
         self._update()
 
+    @staticmethod
+    def _per_channel(scalar: float, color_rgb: tuple[float, float, float],
+                     ) -> tuple[float, float, float]:
+        """Multiply scalar by an RGB colour vector, returned in BGR order."""
+        r, g, b = color_rgb
+        return (scalar * b, scalar * g, scalar * r)
+
     def _update(self) -> None:
         cap_frac = self.controls.cap_frac.val
         global_max = max(h.max() for h in self._raw_hists)
         cap = cap_frac * global_max
         capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
 
-        t = self.controls.t.val
-        s = self.controls.s.val
-        c = self.controls.c.val
-        g = self.controls.g.val
-        black = self.controls.black.val
-        white = self.controls.white.val
+        ctrl = self.controls
+        t = self._per_channel(ctrl.t.val, ctrl.color_t.rgb)
+        s = self._per_channel(ctrl.s.val, ctrl.color_s.rgb)
+        c = self._per_channel(ctrl.c.val, ctrl.color_c.rgb)
+        g = self._per_channel(ctrl.g.val, ctrl.color_g.rgb)
+        black = self._per_channel(ctrl.black.val, ctrl.color_black.rgb)
+        white = self._per_channel(ctrl.white.val, ctrl.color_white.rgb)
 
         out_float = apply_cdf_transform(
             self._src_float, capped_hists, t, s, c, g, black, white,
         )
-        if self.controls.linear_check.isChecked():
+        if ctrl.linear_check.isChecked():
             out_float = srgb_oetf(np.clip(out_float, 0.0, 1.0))
         out_bgr = (np.clip(out_float, 0.0, 1.0) * 255.0).astype(np.uint8)
 
