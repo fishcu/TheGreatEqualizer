@@ -16,6 +16,7 @@ from PySide6.QtCore import Qt, Signal, QSize, QEvent
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QLabel,
     QMainWindow,
     QSlider,
@@ -33,6 +34,16 @@ def bgr_to_qimage(img: np.ndarray) -> QImage:
 
 
 NUM_BINS = 256
+
+
+def srgb_eotf(v: np.ndarray) -> np.ndarray:
+    """sRGB electro-optical transfer function (sRGB → linear)."""
+    return np.where(v <= 0.04045, v / 12.92, np.power((v + 0.055) / 1.055, 2.4))
+
+
+def srgb_oetf(l: np.ndarray) -> np.ndarray:
+    """sRGB opto-electronic transfer function (linear → sRGB)."""
+    return np.where(l <= 0.0031308, 12.92 * l, 1.055 * np.power(l, 1.0 / 2.4) - 0.055)
 
 
 def compute_histogram(channel: np.ndarray, num_bins: int = NUM_BINS) -> np.ndarray:
@@ -229,7 +240,8 @@ class HistogramPlot(QMainWindow):
         ):
             ax.clear()
             for hist, color in zip(hists, self.COLORS):
-                ax.plot(self._bins, hist, color=color, linewidth=0.7, alpha=0.7)
+                ax.plot(self._bins, hist, color=color,
+                        linewidth=0.7, alpha=0.7)
             ax.set_xlim(0, 1)
             ax.set_ylabel("count")
             ax.set_title(title, fontsize=9)
@@ -269,7 +281,8 @@ class CdfPlot(QMainWindow):
             total = cdf[-1]
             if total > 0:
                 cdf /= total
-            ax_in.plot(self._hist_bins, cdf, color=color, linewidth=0.8, alpha=0.7)
+            ax_in.plot(self._hist_bins, cdf, color=color,
+                       linewidth=0.8, alpha=0.7)
         ax_in.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
         ax_in.set_xlim(0, 1)
         ax_in.set_ylim(0, 1)
@@ -282,7 +295,8 @@ class CdfPlot(QMainWindow):
         ax_tgt.clear()
         target = compute_target_cdf(self._cdf_x, t, s, c, g, black, white)
         ax_tgt.plot(self._cdf_x, target, color="black", linewidth=1.4)
-        ax_tgt.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
+        ax_tgt.plot([0, 1], [0, 1], color="gray",
+                    linewidth=0.5, linestyle="--")
         ax_tgt.set_xlim(0, 1)
         ax_tgt.set_ylim(0, 1)
         ax_tgt.set_aspect("equal")
@@ -355,12 +369,18 @@ class ControlsPanel(QWidget):
     """Separate window holding all parameter sliders."""
 
     params_changed = Signal()
+    linear_changed = Signal(bool)
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Controls")
 
         layout = QVBoxLayout()
+
+        self.linear_check = QCheckBox("Process in linear")
+        layout.addWidget(self.linear_check)
+        self.linear_check.toggled.connect(self.linear_changed.emit)
+
         self.cap_frac = LabeledSlider("cap", 0.0, 1.0, 1.0)
         self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
         self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
@@ -385,7 +405,8 @@ class ControlsPanel(QWidget):
 class App:
     def __init__(self, src_bgr: np.ndarray) -> None:
         self._src_bgr = src_bgr
-        self._src_float = src_bgr.astype(np.float64) / 255.0
+        self._src_srgb = src_bgr.astype(np.float64) / 255.0
+        self._src_float = self._src_srgb.copy()
 
         screen = QApplication.primaryScreen().availableGeometry()
         default_w = min(src_bgr.shape[1], int(screen.width() * 0.55))
@@ -398,11 +419,12 @@ class App:
         self.viewer.resize(default_w, default_h)
         self.viewer.move(screen.x() + margin, screen.y() + margin)
 
-        ctrl_w, ctrl_h = 420, 260
+        ctrl_w, ctrl_h = 420, 290
         self.controls = ControlsPanel()
         self.controls.resize(ctrl_w, ctrl_h)
         self.controls.move(right_x, screen.y() + margin)
         self.controls.params_changed.connect(self._update)
+        self.controls.linear_changed.connect(self._on_linear_changed)
 
         hist_w, hist_h = 500, 350
         self.hist_plot = HistogramPlot()
@@ -412,13 +434,24 @@ class App:
         cdf_w, cdf_h = 500, 300
         self.cdf_plot = CdfPlot()
         self.cdf_plot.resize(cdf_w, cdf_h)
-        self.cdf_plot.move(right_x, screen.y() + margin + ctrl_h + margin + hist_h + margin)
+        self.cdf_plot.move(right_x, screen.y() + margin +
+                           ctrl_h + margin + hist_h + margin)
 
         self.viewer.show()
         self.hist_plot.show()
         self.cdf_plot.show()
         self.controls.show()
 
+        self._raw_hists = [
+            compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
+        ]
+        self._update()
+
+    def _on_linear_changed(self, linear: bool) -> None:
+        if linear:
+            self._src_float = srgb_eotf(self._src_srgb)
+        else:
+            self._src_float = self._src_srgb.copy()
         self._raw_hists = [
             compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
         ]
@@ -440,7 +473,9 @@ class App:
         out_float = apply_cdf_transform(
             self._src_float, capped_hists, t, s, c, g, black, white,
         )
-        out_bgr = (out_float * 255.0).astype(np.uint8)
+        if self.controls.linear_check.isChecked():
+            out_float = srgb_oetf(np.clip(out_float, 0.0, 1.0))
+        out_bgr = (np.clip(out_float, 0.0, 1.0) * 255.0).astype(np.uint8)
 
         self.viewer.show_image(out_bgr)
         self.viewer.set_alt_image(self._src_bgr)
