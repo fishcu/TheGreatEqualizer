@@ -1,0 +1,155 @@
+"""Fit parametric target-CDF parameters to observed input CDFs.
+
+Uses Adam with numerical gradients — pure numpy, no external optimiser
+dependency, directly portable to Kotlin / any other language.
+"""
+
+import numpy as np
+
+# Parameter names and their (min, max) bounds, mirroring the UI sliders.
+PARAM_NAMES = ("t", "s", "c", "g", "black", "white")
+PARAM_BOUNDS = {
+    "t": (0.01, 5.0),
+    "s": (0.01, 5.0),
+    "c": (0.01, 0.99),
+    "g": (0.1, 3.0),
+    "black": (-0.2, 0.2),
+    "white": (0.8, 1.2),
+}
+PARAM_DEFAULTS = {"t": 1.0, "s": 1.0, "c": 0.5,
+                  "g": 1.0, "black": 0.0, "white": 1.0}
+
+
+def compute_target_cdf(
+    x: np.ndarray,
+    t: float,
+    s: float,
+    c: float,
+    g: float,
+    black: float,
+    white: float,
+) -> np.ndarray:
+    """Parametric target CDF — identical to the one in main.py."""
+    alpha = s * c / (s * c + t * (1.0 - c))
+    beta = 1.0 - alpha
+    h = np.where(
+        x <= c,
+        alpha * np.power(x / c, t),
+        1.0 - beta * np.power((1.0 - x) / (1.0 - c), s),
+    )
+    f = np.power(h, g)
+    return np.clip(black + f * (white - black), 0.0, 1.0)
+
+
+def _pack(params: dict[str, float]) -> np.ndarray:
+    return np.array([params[n] for n in PARAM_NAMES])
+
+
+def _unpack(vec: np.ndarray) -> dict[str, float]:
+    return {n: float(vec[i]) for i, n in enumerate(PARAM_NAMES)}
+
+
+def _clamp_vec(vec: np.ndarray) -> np.ndarray:
+    lo = np.array([PARAM_BOUNDS[n][0] for n in PARAM_NAMES])
+    hi = np.array([PARAM_BOUNDS[n][1] for n in PARAM_NAMES])
+    return np.clip(vec, lo, hi)
+
+
+def _mse(x: np.ndarray, target_cdf: np.ndarray, params: np.ndarray) -> float:
+    p = _unpack(params)
+    pred = compute_target_cdf(
+        x, p["t"], p["s"], p["c"], p["g"], p["black"], p["white"])
+    return float(np.mean((pred - target_cdf) ** 2))
+
+
+def _numerical_grad(
+    x: np.ndarray,
+    target_cdf: np.ndarray,
+    params: np.ndarray,
+    eps: float = 1e-5,
+) -> np.ndarray:
+    grad = np.zeros_like(params)
+    for i in range(len(params)):
+        p_plus = params.copy()
+        p_minus = params.copy()
+        p_plus[i] += eps
+        p_minus[i] -= eps
+        p_plus = _clamp_vec(p_plus)
+        p_minus = _clamp_vec(p_minus)
+        grad[i] = (_mse(x, target_cdf, p_plus) - _mse(x, target_cdf,
+                   p_minus)) / (p_plus[i] - p_minus[i] + 1e-30)
+    return grad
+
+
+def _fit_single_channel(
+    input_cdf: np.ndarray,
+    num_bins: int,
+    steps: int = 1000,
+    lr: float = 0.01,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
+    adam_eps: float = 1e-8,
+) -> dict[str, float]:
+    """Fit params for one channel's input CDF using Adam."""
+    x = np.linspace(0.0, 1.0, num_bins)
+    params = _pack(PARAM_DEFAULTS)
+    m = np.zeros_like(params)
+    v = np.zeros_like(params)
+
+    for step in range(1, steps + 1):
+        g = _numerical_grad(x, input_cdf, params)
+        m = beta1 * m + (1.0 - beta1) * g
+        v = beta2 * v + (1.0 - beta2) * g * g
+        m_hat = m / (1.0 - beta1 ** step)
+        v_hat = v / (1.0 - beta2 ** step)
+        params -= lr * m_hat / (np.sqrt(v_hat) + adam_eps)
+        params = _clamp_vec(params)
+
+    return _unpack(params)
+
+
+def fit_initial_params(
+    capped_hists: list[np.ndarray],
+    steps: int = 1000,
+    lr: float = 0.01,
+) -> list[dict[str, float]]:
+    """Fit target-CDF parameters for each BGR channel independently.
+
+    *capped_hists* is a list of 3 histogram arrays (one per BGR channel).
+    Returns a list of 3 dicts, each mapping param name -> fitted value.
+    """
+    results: list[dict[str, float]] = []
+    for hist in capped_hists:
+        cdf = np.cumsum(hist)
+        total = cdf[-1]
+        if total > 0:
+            cdf = cdf / total
+        fitted = _fit_single_channel(cdf, len(cdf), steps=steps, lr=lr)
+        results.append(fitted)
+    return results
+
+
+def decompose_per_channel(
+    bgr_params: list[dict[str, float]],
+) -> dict[str, tuple[float, tuple[float, float, float]]]:
+    """Decompose 3 per-channel param dicts into (scalar, rgb_color) pairs.
+
+    For each param name, the scalar is the value that keeps the colour vector
+    normalised (max component = 1).  The colour tuple is in RGB order (matching
+    the UI's ColorButton convention).  Channel order in *bgr_params* is BGR.
+    """
+    result: dict[str, tuple[float, tuple[float, float, float]]] = {}
+    for name in PARAM_NAMES:
+        b_val = bgr_params[0][name]
+        g_val = bgr_params[1][name]
+        r_val = bgr_params[2][name]
+        m = max(abs(r_val), abs(g_val), abs(b_val))
+        if m < 1e-12:
+            result[name] = (0.0, (1.0, 1.0, 1.0))
+        else:
+            sign = 1.0 if max(r_val, g_val, b_val) >= - \
+                min(r_val, g_val, b_val) else -1.0
+            scalar = sign * m
+            result[name] = (
+                scalar, (r_val / scalar, g_val / scalar, b_val / scalar))
+    return result

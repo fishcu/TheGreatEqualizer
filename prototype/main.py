@@ -10,6 +10,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
+from fit_params import fit_initial_params, decompose_per_channel
 import matplotlib.figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from PySide6.QtCore import Qt, Signal, QSize, QEvent
@@ -335,6 +337,11 @@ class ColorButton(QPushButton):
     def rgb(self) -> tuple[float, float, float]:
         return self._rgb
 
+    def set_rgb(self, rgb: tuple[float, float, float]) -> None:
+        self._rgb = rgb
+        self._refresh_style()
+        self.color_changed.emit()
+
     def _refresh_style(self) -> None:
         r, g, b = (int(v * 255) for v in self._rgb)
         self.setStyleSheet(
@@ -395,6 +402,9 @@ class LabeledSlider(QWidget):
     def val(self) -> float:
         return self._tick_to_float(self._slider.value())
 
+    def set_val(self, v: float) -> None:
+        self._slider.setValue(self._float_to_tick(v))
+
     def _tick_to_float(self, tick: int) -> float:
         return self._min + (self._max - self._min) * tick / self._steps
 
@@ -420,6 +430,7 @@ class ControlsPanel(QWidget):
 
     params_changed = Signal()
     linear_changed = Signal(bool)
+    fit_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -430,6 +441,10 @@ class ControlsPanel(QWidget):
         self.linear_check = QCheckBox("Process in linear")
         layout.addWidget(self.linear_check)
         self.linear_check.toggled.connect(self.linear_changed.emit)
+
+        self.fit_btn = QPushButton("Fit to input CDF")
+        layout.addWidget(self.fit_btn)
+        self.fit_btn.clicked.connect(self.fit_requested.emit)
 
         self.cap_frac = LabeledSlider("cap", 0.0, 1.0, 1.0)
         layout.addWidget(self.cap_frac)
@@ -498,6 +513,7 @@ class App:
         self.controls.move(right_x, screen.y() + margin)
         self.controls.params_changed.connect(self._update)
         self.controls.linear_changed.connect(self._on_linear_changed)
+        self.controls.fit_requested.connect(self._on_fit_requested)
 
         hist_w, hist_h = 500, 350
         self.hist_plot = HistogramPlot()
@@ -518,6 +534,7 @@ class App:
         self._raw_hists = [
             compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
         ]
+        self._fit_and_apply_params()
         self._update()
 
     def _on_linear_changed(self, linear: bool) -> None:
@@ -528,7 +545,39 @@ class App:
         self._raw_hists = [
             compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
         ]
+        self._fit_and_apply_params()
         self._update()
+
+    def _on_fit_requested(self) -> None:
+        self._fit_and_apply_params()
+        self._update()
+
+    def _fit_and_apply_params(self) -> None:
+        """Run the optimizer and push fitted values into sliders/colors."""
+        cap_frac = self.controls.cap_frac.val
+        global_max = max(h.max() for h in self._raw_hists)
+        cap = cap_frac * global_max
+        capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
+
+        bgr_params = fit_initial_params(capped_hists)
+        decomposed = decompose_per_channel(bgr_params)
+
+        ctrl = self.controls
+        slider_color_pairs = {
+            "t": (ctrl.t, ctrl.color_t),
+            "s": (ctrl.s, ctrl.color_s),
+            "c": (ctrl.c, ctrl.color_c),
+            "g": (ctrl.g, ctrl.color_g),
+            "black": (ctrl.black, ctrl.color_black),
+            "white": (ctrl.white, ctrl.color_white),
+        }
+
+        ctrl.blockSignals(True)
+        for name, (slider, cbtn) in slider_color_pairs.items():
+            scalar, rgb = decomposed[name]
+            slider.set_val(scalar)
+            cbtn.set_rgb(rgb)
+        ctrl.blockSignals(False)
 
     @staticmethod
     def _per_channel(scalar: float, color_rgb: tuple[float, float, float],
