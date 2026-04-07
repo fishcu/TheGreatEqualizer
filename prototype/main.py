@@ -20,7 +20,9 @@ from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, Signal
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import matplotlib.figure
 from oklab import (
+    build_gamut_lut,
     chroma_offset_ab,
+    gamut_clamp_ab,
     linear_bgr_to_oklab,
     oklab_to_linear_bgr,
     zone_weights_cdf,
@@ -526,6 +528,7 @@ class App:
         self._src_bgr = src_bgr
         src_linear = srgb_eotf(src_bgr.astype(np.float32) / 255.0)
         self._L, self._a, self._b_ok = linear_bgr_to_oklab(src_linear)
+        self._gamut_lut = build_gamut_lut()
         self._raw_hist_L = compute_histogram(np.clip(self._L, 0.0, 1.0))
 
         screen = QApplication.primaryScreen().availableGeometry()
@@ -675,6 +678,7 @@ class App:
             ctrl.hi_str.val,
         )
 
+        a2, b2 = gamut_clamp_ab(L_out, a2, b2, self._gamut_lut)
         out_bgr = oklab_to_linear_bgr(L_out, a2, b2)
         out_bgr = np.clip(out_bgr, 0.0, 1.0)
         out_enc = srgb_oetf(out_bgr)

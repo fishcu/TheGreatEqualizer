@@ -79,6 +79,71 @@ def zone_weights_cdf(
     return w_s / w_sum, w_m / w_sum, w_h / w_sum
 
 
+def build_gamut_lut(n_L: int = 256, n_h: int = 360) -> np.ndarray:
+    """Precompute max OKLab chroma for sRGB at each (L, hue) via bisection.
+
+    Returns a float32 array of shape (n_L, n_h) where entry [i, j] is the
+    largest chroma C such that (L_i, C·cos h_j, C·sin h_j) maps to linear
+    RGB in [0, 1].
+    """
+    L_vals = np.linspace(0.0, 1.0, n_L, dtype=np.float32)
+    h_vals = np.linspace(0.0, 2.0 * np.pi, n_h, endpoint=False, dtype=np.float32)
+    L_grid, h_grid = np.meshgrid(L_vals, h_vals, indexing="ij")
+    cos_h = np.cos(h_grid)
+    sin_h = np.sin(h_grid)
+
+    lo = np.zeros((n_L, n_h), dtype=np.float32)
+    hi = np.full((n_L, n_h), 0.5, dtype=np.float32)
+
+    for _ in range(20):
+        mid = (lo + hi) * 0.5
+        lab = np.stack((L_grid, mid * cos_h, mid * sin_h), axis=-1)
+        rgb = (lab @ _M2_INV.T) ** 3 @ _M1_INV.T
+        in_gamut = np.all((rgb >= -1e-6) & (rgb <= 1.0 + 1e-6), axis=-1)
+        lo = np.where(in_gamut, mid, lo)
+        hi = np.where(in_gamut, hi, mid)
+
+    return lo
+
+
+def gamut_clamp_ab(
+    L: np.ndarray,
+    a: np.ndarray,
+    b_ok: np.ndarray,
+    gamut_lut: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce chroma to stay inside the sRGB gamut while preserving L and hue.
+
+    Uses bilinear interpolation (with hue-wrapping) into *gamut_lut* built
+    by :func:`build_gamut_lut`.
+    """
+    n_L, n_h = gamut_lut.shape
+    C = np.sqrt(a * a + b_ok * b_ok)
+    h = np.arctan2(b_ok, a) % (2.0 * np.pi)
+
+    li_f = np.clip(L, 0.0, 1.0) * (n_L - 1)
+    hi_f = h * (n_h / (2.0 * np.pi))
+
+    li0 = np.floor(li_f).astype(np.intp)
+    li1 = np.minimum(li0 + 1, n_L - 1)
+    fl = (li_f - li0).astype(np.float32)
+
+    hi0 = np.floor(hi_f).astype(np.intp) % n_h
+    hi1 = (hi0 + 1) % n_h
+    fh = (hi_f - np.floor(hi_f)).astype(np.float32)
+
+    max_C = (
+        gamut_lut[li0, hi0] * (1 - fl) * (1 - fh)
+        + gamut_lut[li0, hi1] * (1 - fl) * fh
+        + gamut_lut[li1, hi0] * fl * (1 - fh)
+        + gamut_lut[li1, hi1] * fl * fh
+    )
+
+    C_safe = np.maximum(C, 1e-10)
+    scale = np.where(C > 1e-10, np.minimum(max_C / C_safe, 1.0), 1.0)
+    return a * scale, b_ok * scale
+
+
 def chroma_offset_ab(
     a: np.ndarray,
     b_ok: np.ndarray,
