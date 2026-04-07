@@ -23,7 +23,7 @@ from oklab import (
     chroma_offset_ab,
     linear_bgr_to_oklab,
     oklab_to_linear_bgr,
-    zone_weights_okl,
+    zone_weights_cdf,
 )
 from fit_params import fit_initial_params
 import numpy as np
@@ -340,7 +340,8 @@ class ZoneDebugWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Zone Debug (Shadows / Mids / Highlights)")
-        self._fig = matplotlib.figure.Figure(figsize=(10, 6), tight_layout=True)
+        self._fig = matplotlib.figure.Figure(
+            figsize=(10, 6), tight_layout=True)
         gs = self._fig.add_gridspec(2, 3, height_ratios=[3, 1])
         self._axes_img = [self._fig.add_subplot(gs[0, i]) for i in range(3)]
         self._ax_curves = self._fig.add_subplot(gs[1, :])
@@ -350,11 +351,11 @@ class ZoneDebugWindow(QMainWindow):
 
     def update(
         self,
-        out_bgr_u8: np.ndarray,
         w_s: np.ndarray,
         w_m: np.ndarray,
         w_h: np.ndarray,
-        sigma: float = 0.17,
+        cdf_bins: np.ndarray,
+        cdf_values: np.ndarray,
     ) -> None:
         zones = (
             (w_s, "Shadows"),
@@ -371,7 +372,9 @@ class ZoneDebugWindow(QMainWindow):
 
         ax_c = self._ax_curves
         ax_c.clear()
-        ws_c, wm_c, wh_c = zone_weights_okl(self._curve_x, sigma=sigma)
+        ws_c, wm_c, wh_c = zone_weights_cdf(
+            self._curve_x, cdf_bins, cdf_values,
+        )
         ax_c.plot(self._curve_x, ws_c, color="steelblue", linewidth=1.2,
                   label="Shadows")
         ax_c.plot(self._curve_x, wm_c, color="forestgreen", linewidth=1.2,
@@ -382,7 +385,7 @@ class ZoneDebugWindow(QMainWindow):
         ax_c.set_ylim(0, 1.05)
         ax_c.set_xlabel("OKLab L (output)", fontsize=8)
         ax_c.set_ylabel("Weight", fontsize=8)
-        ax_c.set_title("Zone weight curves", fontsize=9)
+        ax_c.set_title("Zone weight curves (CDF-adaptive)", fontsize=9)
         ax_c.legend(fontsize=8, loc="upper right")
         ax_c.grid(alpha=0.3)
 
@@ -500,13 +503,11 @@ class ControlsPanel(QWidget):
         self.hi_angle = LabeledSlider(
             "highlight angle", 0.0, 360.0, 0.0, steps=3600)
         self.hi_str = LabeledSlider("highlight str", 0.0, 0.25, 0.0)
-        self.zone_sigma = LabeledSlider("zone sigma", 0.05, 0.50, 0.17)
 
         for slider in (
             self.sh_angle, self.sh_str,
             self.mid_angle, self.mid_str,
             self.hi_angle, self.hi_str,
-            self.zone_sigma,
         ):
             layout.addWidget(slider)
             slider.value_changed.connect(lambda _: self.params_changed.emit())
@@ -560,7 +561,8 @@ class App:
             np.ndarray, np.ndarray, float, float, float, float,
         ] | None = None
         self._zone_payload: tuple[
-            np.ndarray, np.ndarray, np.ndarray, np.ndarray, float,
+            np.ndarray, np.ndarray, np.ndarray,
+            np.ndarray, np.ndarray,
         ] | None = None
 
         hist_w, hist_h = 500, 350
@@ -651,21 +653,26 @@ class App:
         L_out = apply_l_channel_cdf(
             self._L, capped_L, t, s, c, g, black, white)
 
-        sigma = ctrl.zone_sigma.val
-        w_s, w_m, w_h = zone_weights_okl(L_out, sigma=sigma)
+        cdf_bins = np.linspace(0.0, 1.0, NUM_BINS)
+        out_hist = compute_histogram(np.clip(L_out, 0.0, 1.0))
+        out_cdf = np.cumsum(out_hist).astype(np.float64)
+        cdf_total = out_cdf[-1]
+        if cdf_total > 0:
+            out_cdf /= cdf_total
+
+        w_s, w_m, w_h = zone_weights_cdf(L_out, cdf_bins, out_cdf)
 
         deg2rad = np.pi / 180.0
         a2, b2 = chroma_offset_ab(
-            L_out,
             self._a,
             self._b_ok,
+            w_s, w_m, w_h,
             ctrl.sh_angle.val * deg2rad,
             ctrl.sh_str.val,
             ctrl.mid_angle.val * deg2rad,
             ctrl.mid_str.val,
             ctrl.hi_angle.val * deg2rad,
             ctrl.hi_str.val,
-            sigma=sigma,
         )
 
         out_bgr = oklab_to_linear_bgr(L_out, a2, b2)
@@ -677,7 +684,7 @@ class App:
         self._plot_payload = (
             self._raw_hist_L, capped_L, t, s, c, g,
         )
-        self._zone_payload = (out_u8, w_s, w_m, w_h, sigma)
+        self._zone_payload = (w_s, w_m, w_h, cdf_bins, out_cdf)
         if sync_plots:
             self._plot_timer.stop()
             self._flush_plots()

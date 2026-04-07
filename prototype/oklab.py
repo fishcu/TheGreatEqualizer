@@ -53,47 +53,46 @@ def oklab_to_linear_bgr(L: np.ndarray, a: np.ndarray, b_ok: np.ndarray) -> np.nd
     return np.ascontiguousarray(rgb[..., ::-1])
 
 
-def zone_weights_okl(
+_CDF_CENTERS = np.array([1.0 / 6.0, 1.0 / 2.0, 5.0 / 6.0], dtype=np.float32)
+_CDF_SIGMA = np.float32(0.2)
+_CDF_INV_2S2 = np.float32(-0.5 / (_CDF_SIGMA * _CDF_SIGMA))
+
+
+def zone_weights_cdf(
     L: np.ndarray,
-    center_shadow: float = 0.22,
-    center_mid: float = 0.50,
-    center_highlight: float = 0.78,
-    sigma: float = 0.17,
+    cdf_bins: np.ndarray,
+    cdf_values: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Smooth Gaussian bumps on OKLab L, normalized to sum to 1 per pixel."""
-    inv_2s2 = np.float32(-0.5 / (sigma * sigma))
-    cs = np.float32(center_shadow)
-    cm = np.float32(center_mid)
-    ch = np.float32(center_highlight)
-    w_s = np.exp(inv_2s2 * (L - cs) ** 2)
-    w_m = np.exp(inv_2s2 * (L - cm) ** 2)
-    w_h = np.exp(inv_2s2 * (L - ch) ** 2)
+    """Zone weights from fixed Gaussians in CDF space.
+
+    Maps each pixel's L through the output CDF to a uniform [0, 1] rank,
+    then applies three Gaussians centered at 1/6, 1/2, 5/6 with fixed
+    sigma.  Adapts automatically to any L distribution with zero tunable
+    parameters.
+    """
+    u = np.interp(np.clip(L, 0.0, 1.0), cdf_bins,
+                  cdf_values).astype(np.float32)
+    w_s = np.exp(_CDF_INV_2S2 * (u - _CDF_CENTERS[0]) ** 2)
+    w_m = np.exp(_CDF_INV_2S2 * (u - _CDF_CENTERS[1]) ** 2)
+    w_h = np.exp(_CDF_INV_2S2 * (u - _CDF_CENTERS[2]) ** 2)
     w_sum = w_s + w_m + w_h + np.float32(1e-12)
     return w_s / w_sum, w_m / w_sum, w_h / w_sum
 
 
 def chroma_offset_ab(
-    L: np.ndarray,
     a: np.ndarray,
     b_ok: np.ndarray,
+    w_s: np.ndarray,
+    w_m: np.ndarray,
+    w_h: np.ndarray,
     theta_shadow_rad: float,
     str_shadow: float,
     theta_mid_rad: float,
     str_mid: float,
     theta_hi_rad: float,
     str_hi: float,
-    center_shadow: float = 0.22,
-    center_mid: float = 0.50,
-    center_highlight: float = 0.78,
-    sigma: float = 0.17,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Add (a,b) offsets = sum_k w_k(L) * str_k * (cos theta_k, sin theta_k).
-
-    *L* should be the lightness used for weighting (output L after tone map).
-    """
-    w_s, w_m, w_h = zone_weights_okl(
-        L, center_shadow, center_mid, center_highlight, sigma,
-    )
+    """Add (a,b) offsets = sum_k w_k * str_k * (cos theta_k, sin theta_k)."""
     da_s = np.float32(str_shadow * np.cos(theta_shadow_rad))
     db_s = np.float32(str_shadow * np.sin(theta_shadow_rad))
     da_m = np.float32(str_mid * np.cos(theta_mid_rad))
