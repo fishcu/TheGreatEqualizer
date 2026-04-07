@@ -5,21 +5,8 @@ Usage:
     python main.py <image_path>
 """
 
-import sys
-from pathlib import Path
-
-import cv2
-import numpy as np
-
-from fit_params import fit_initial_params, decompose_per_channel
-import matplotlib.figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from PySide6.QtCore import Qt, Signal, QSize, QEvent
-from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
-    QColorDialog,
     QLabel,
     QMainWindow,
     QPushButton,
@@ -28,6 +15,29 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QWidget,
 )
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer, Signal
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+import matplotlib.figure
+from oklab import (
+    chroma_offset_ab,
+    linear_bgr_to_oklab,
+    oklab_to_linear_bgr,
+)
+from fit_params import fit_initial_params
+import numpy as np
+import matplotlib
+import cv2
+from pathlib import Path
+import sys
+import os
+
+# Matplotlib's Qt backend must match PySide6; otherwise FigureCanvas subclasses
+# PyQt6.QtWidgets.QWidget and setCentralWidget rejects it.
+os.environ.setdefault("QT_API", "pyside6")
+
+
+matplotlib.use("qtagg")
 
 
 def bgr_to_qimage(img: np.ndarray) -> QImage:
@@ -40,14 +50,27 @@ def bgr_to_qimage(img: np.ndarray) -> QImage:
 NUM_BINS = 256
 
 
+def clamp_window_top_left(available: QRect, x: int, y: int, w: int, h: int) -> tuple[int, int]:
+    """Clamp top-left so a w×h window stays inside *available* (e.g. primaryScreen().availableGeometry())."""
+    left = available.left()
+    top = available.top()
+    x_max = left + available.width() - w
+    y_max = top + available.height() - h
+    return max(left, min(x, x_max)), max(top, min(y, y_max))
+
+
 def srgb_eotf(v: np.ndarray) -> np.ndarray:
     """sRGB electro-optical transfer function (sRGB → linear)."""
-    return np.where(v <= 0.04045, v / 12.92, np.power((v + 0.055) / 1.055, 2.4))
+    return np.where(
+        v <= 0.04045, v / 12.92, np.power((v + 0.055) / 1.055, 2.4),
+    ).astype(v.dtype, copy=False)
 
 
-def srgb_oetf(l: np.ndarray) -> np.ndarray:
+def srgb_oetf(v: np.ndarray) -> np.ndarray:
     """sRGB opto-electronic transfer function (linear → sRGB)."""
-    return np.where(l <= 0.0031308, 12.92 * l, 1.055 * np.power(l, 1.0 / 2.4) - 0.055)
+    return np.where(
+        v <= 0.0031308, 12.92 * v, 1.055 * np.power(v, 1.0 / 2.4) - 0.055,
+    ).astype(v.dtype, copy=False)
 
 
 def compute_histogram(channel: np.ndarray, num_bins: int = NUM_BINS) -> np.ndarray:
@@ -122,41 +145,29 @@ def compute_target_cdf(
     return np.clip(black + f * (white - black), 0.0, 1.0)
 
 
-def apply_cdf_transform(
-    src_float: np.ndarray,
-    capped_hists: list[np.ndarray],
-    t: tuple[float, float, float],
-    s: tuple[float, float, float],
-    c: tuple[float, float, float],
-    g: tuple[float, float, float],
-    black: tuple[float, float, float],
-    white: tuple[float, float, float],
+def apply_l_channel_cdf(
+    L: np.ndarray,
+    capped_hist: np.ndarray,
+    t: float,
+    s: float,
+    c: float,
+    g: float,
+    black: float,
+    white: float,
 ) -> np.ndarray:
-    """Apply histogram specification to each BGR channel independently.
-
-    Parameters are 3-tuples (one value per BGR channel).  For each channel:
-    build the input CDF from its capped histogram, invert the parametric
-    target CDF, and compose them into a transfer LUT that is applied to the
-    image via linear interpolation.
-    """
-    out = src_float.copy()
+    """Histogram specification on scalar OKLab L (input clipped to [0, 1] for LUT)."""
     bin_centers = np.linspace(0.0, 1.0, NUM_BINS)
     target_x = np.linspace(0.0, 1.0, 4096)
-
-    for ch in range(3):
-        target_y = compute_target_cdf(
-            target_x, t[ch], s[ch], c[ch], g[ch], black[ch], white[ch],
-        )
-
-        input_cdf = np.cumsum(capped_hists[ch])
-        total = input_cdf[-1]
-        if total > 0:
-            input_cdf /= total
-
-        transfer = np.interp(input_cdf, target_y, target_x)
-        out[:, :, ch] = np.interp(src_float[:, :, ch], bin_centers, transfer)
-
-    return np.clip(out, 0.0, 1.0)
+    target_y = compute_target_cdf(
+        target_x, t, s, c, g, black, white,
+    )
+    input_cdf = np.cumsum(capped_hist)
+    total = input_cdf[-1]
+    if total > 0:
+        input_cdf /= total
+    transfer = np.interp(input_cdf, target_y, target_x)
+    L_in = np.clip(L, 0.0, 1.0)
+    return np.clip(np.interp(L_in, bin_centers, transfer), 0.0, 1.0).astype(L.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +234,11 @@ class ImageViewer(QMainWindow):
 
 
 class HistogramPlot(QMainWindow):
-    """Window with raw and capped histograms stacked vertically."""
-
-    COLORS = ["blue", "green", "red"]  # BGR channel order
+    """Window with raw and capped OKLab L histograms stacked vertically."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Histograms")
+        self.setWindowTitle("Histograms (OKLab L)")
         self._fig = matplotlib.figure.Figure(figsize=(6, 4), tight_layout=True)
         self._ax_raw, self._ax_cap = self._fig.subplots(2, 1, sharex=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
@@ -238,32 +247,28 @@ class HistogramPlot(QMainWindow):
 
     def update(
         self,
-        raw_hists: list[np.ndarray],
-        capped_hists: list[np.ndarray],
+        raw_hist: np.ndarray,
+        capped_hist: np.ndarray,
     ) -> None:
-        for ax, hists, title in (
-            (self._ax_raw, raw_hists, "Raw"),
-            (self._ax_cap, capped_hists, "Capped"),
+        for ax, hist, title in (
+            (self._ax_raw, raw_hist, "Raw L"),
+            (self._ax_cap, capped_hist, "Capped L"),
         ):
             ax.clear()
-            for hist, color in zip(hists, self.COLORS):
-                ax.plot(self._bins, hist, color=color,
-                        linewidth=0.7, alpha=0.7)
+            ax.plot(self._bins, hist, color="black", linewidth=0.8, alpha=0.85)
             ax.set_xlim(0, 1)
             ax.set_ylabel("count")
             ax.set_title(title, fontsize=9)
-        self._ax_cap.set_xlabel("intensity")
+        self._ax_cap.set_xlabel("OKLab L (clipped to [0,1] for bins)")
         self._canvas.draw_idle()
 
 
 class CdfPlot(QMainWindow):
-    """Window with input CDF and target CDF side by side."""
-
-    COLORS = ["blue", "green", "red"]
+    """Window with input L CDF and parametric target CDF side by side."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("CDFs")
+        self.setWindowTitle("CDFs (OKLab L)")
         self._fig = matplotlib.figure.Figure(figsize=(8, 4), tight_layout=True)
         self._ax_in, self._ax_tgt = self._fig.subplots(1, 2)
         self._canvas = FigureCanvasQTAgg(self._fig)
@@ -273,94 +278,46 @@ class CdfPlot(QMainWindow):
 
     def update(
         self,
-        capped_hists: list[np.ndarray],
-        t: tuple[float, float, float],
-        s: tuple[float, float, float],
-        c: tuple[float, float, float],
-        g: tuple[float, float, float],
-        black: tuple[float, float, float],
-        white: tuple[float, float, float],
+        capped_hist: np.ndarray,
+        t: float,
+        s: float,
+        c: float,
+        g: float,
+        black: float,
+        white: float,
     ) -> None:
         ax_in = self._ax_in
         ax_in.clear()
-        for hist, color in zip(capped_hists, self.COLORS):
-            cdf = np.cumsum(hist)
-            total = cdf[-1]
-            if total > 0:
-                cdf /= total
-            ax_in.plot(self._hist_bins, cdf, color=color,
-                       linewidth=0.8, alpha=0.7)
+        cdf = np.cumsum(capped_hist)
+        total = cdf[-1]
+        if total > 0:
+            cdf /= total
+        ax_in.plot(self._hist_bins, cdf, color="black",
+                   linewidth=0.9, alpha=0.85)
         ax_in.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
         ax_in.set_xlim(0, 1)
         ax_in.set_ylim(0, 1)
         ax_in.set_aspect("equal")
-        ax_in.set_xlabel("intensity")
+        ax_in.set_xlabel("L")
         ax_in.set_ylabel("CDF")
-        ax_in.set_title("Input CDF", fontsize=9)
+        ax_in.set_title("Input CDF (L)", fontsize=9)
 
         ax_tgt = self._ax_tgt
         ax_tgt.clear()
-        for ch, color in enumerate(self.COLORS):
-            target = compute_target_cdf(
-                self._cdf_x, t[ch], s[ch], c[ch], g[ch], black[ch], white[ch],
-            )
-            ax_tgt.plot(self._cdf_x, target, color=color,
-                        linewidth=1.0, alpha=0.8)
+        target = compute_target_cdf(
+            self._cdf_x, t, s, c, g, black, white,
+        )
+        ax_tgt.plot(self._cdf_x, target, color="darkgreen",
+                    linewidth=1.1, alpha=0.9)
         ax_tgt.plot([0, 1], [0, 1], color="gray",
                     linewidth=0.5, linestyle="--")
         ax_tgt.set_xlim(0, 1)
         ax_tgt.set_ylim(0, 1)
         ax_tgt.set_aspect("equal")
-        ax_tgt.set_xlabel("intensity")
-        ax_tgt.set_title("Target CDF", fontsize=9)
+        ax_tgt.set_xlabel("L")
+        ax_tgt.set_title("Target CDF (L)", fontsize=9)
 
         self._canvas.draw_idle()
-
-
-class ColorButton(QPushButton):
-    """Small color swatch that opens QColorDialog on click.
-
-    Stores the picked color as an RGB tuple normalized so the maximum
-    component equals 1.0 (i.e. the "tint direction").
-    """
-
-    color_changed = Signal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._rgb = (1.0, 1.0, 1.0)
-        self.setFixedSize(24, 24)
-        self._refresh_style()
-        self.clicked.connect(self._pick_color)
-
-    @property
-    def rgb(self) -> tuple[float, float, float]:
-        return self._rgb
-
-    def set_rgb(self, rgb: tuple[float, float, float]) -> None:
-        self._rgb = rgb
-        self._refresh_style()
-        self.color_changed.emit()
-
-    def _refresh_style(self) -> None:
-        r, g, b = (int(v * 255) for v in self._rgb)
-        self.setStyleSheet(
-            f"ColorButton {{ background-color: rgb({r},{g},{b}); border: 1px solid #888; }}"
-        )
-
-    def _pick_color(self) -> None:
-        r, g, b = (int(v * 255) for v in self._rgb)
-        chosen = QColorDialog.getColor(QColor(r, g, b), self)
-        if not chosen.isValid():
-            return
-        rf, gf, bf = chosen.redF(), chosen.greenF(), chosen.blueF()
-        m = max(rf, gf, bf)
-        if m < 1e-9:
-            self._rgb = (1.0, 1.0, 1.0)
-        else:
-            self._rgb = (rf / m, gf / m, bf / m)
-        self._refresh_style()
-        self.color_changed.emit()
 
 
 class LabeledSlider(QWidget):
@@ -426,10 +383,9 @@ class LabeledSlider(QWidget):
 
 
 class ControlsPanel(QWidget):
-    """Separate window holding all parameter sliders."""
+    """Separate window holding luminance CDF sliders and zone chroma offsets."""
 
     params_changed = Signal()
-    linear_changed = Signal(bool)
     fit_requested = Signal()
 
     def __init__(self) -> None:
@@ -438,11 +394,7 @@ class ControlsPanel(QWidget):
 
         layout = QVBoxLayout()
 
-        self.linear_check = QCheckBox("Process in linear")
-        layout.addWidget(self.linear_check)
-        self.linear_check.toggled.connect(self.linear_changed.emit)
-
-        self.fit_btn = QPushButton("Fit to input CDF")
+        self.fit_btn = QPushButton("Fit to input L CDF")
         layout.addWidget(self.fit_btn)
         self.fit_btn.clicked.connect(self.fit_requested.emit)
 
@@ -451,35 +403,42 @@ class ControlsPanel(QWidget):
         self.cap_frac.value_changed.connect(
             lambda _: self.params_changed.emit())
 
+        lum_label = QLabel("Luminance (target CDF on OKLab L)")
+        layout.addWidget(lum_label)
+
         self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
         self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
-        self.c = LabeledSlider("c", 0.0, 1.0, 0.5)
+        self.c = LabeledSlider("c", 0.01, 0.99, 0.5)
         self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
         self.black = LabeledSlider("black", -0.2, 0.2, 0.0)
         self.white = LabeledSlider("white", 0.8, 1.2, 1.0)
 
-        self.color_t = ColorButton()
-        self.color_s = ColorButton()
-        self.color_c = ColorButton()
-        self.color_g = ColorButton()
-        self.color_black = ColorButton()
-        self.color_white = ColorButton()
-
-        for slider, cbtn in (
-            (self.t, self.color_t),
-            (self.s, self.color_s),
-            (self.c, self.color_c),
-            (self.g, self.color_g),
-            (self.black, self.color_black),
-            (self.white, self.color_white),
-        ):
-            row = QHBoxLayout()
-            row.addWidget(slider, stretch=1)
-            row.addWidget(cbtn)
-            row.setContentsMargins(0, 0, 0, 0)
-            layout.addLayout(row)
+        for slider in (self.t, self.s, self.c, self.g, self.black, self.white):
+            layout.addWidget(slider)
             slider.value_changed.connect(lambda _: self.params_changed.emit())
-            cbtn.color_changed.connect(self.params_changed.emit)
+
+        chrom_label = QLabel(
+            "Chroma (OKLab a,b): angle deg + strength; weights use output L"
+        )
+        layout.addWidget(chrom_label)
+
+        self.sh_angle = LabeledSlider(
+            "shadow angle", 0.0, 360.0, 0.0, steps=3600)
+        self.sh_str = LabeledSlider("shadow str", 0.0, 0.25, 0.0)
+        self.mid_angle = LabeledSlider(
+            "mid angle", 0.0, 360.0, 0.0, steps=3600)
+        self.mid_str = LabeledSlider("mid str", 0.0, 0.25, 0.0)
+        self.hi_angle = LabeledSlider(
+            "highlight angle", 0.0, 360.0, 0.0, steps=3600)
+        self.hi_str = LabeledSlider("highlight str", 0.0, 0.25, 0.0)
+
+        for slider in (
+            self.sh_angle, self.sh_str,
+            self.mid_angle, self.mid_str,
+            self.hi_angle, self.hi_str,
+        ):
+            layout.addWidget(slider)
+            slider.value_changed.connect(lambda _: self.params_changed.emit())
 
         layout.addStretch()
         self.setLayout(layout)
@@ -493,8 +452,9 @@ class ControlsPanel(QWidget):
 class App:
     def __init__(self, src_bgr: np.ndarray) -> None:
         self._src_bgr = src_bgr
-        self._src_srgb = src_bgr.astype(np.float64) / 255.0
-        self._src_float = self._src_srgb.copy()
+        src_linear = srgb_eotf(src_bgr.astype(np.float32) / 255.0)
+        self._L, self._a, self._b_ok = linear_bgr_to_oklab(src_linear)
+        self._raw_hist_L = compute_histogram(np.clip(self._L, 0.0, 1.0))
 
         screen = QApplication.primaryScreen().availableGeometry()
         default_w = min(src_bgr.shape[1], int(screen.width() * 0.55))
@@ -505,112 +465,135 @@ class App:
 
         self.viewer = ImageViewer("Output", quit_on_close=True)
         self.viewer.resize(default_w, default_h)
-        self.viewer.move(screen.x() + margin, screen.y() + margin)
+        self.viewer.move(
+            *clamp_window_top_left(
+                screen, screen.x() + margin, screen.y() + margin, default_w, default_h,
+            ),
+        )
 
-        ctrl_w, ctrl_h = 420, 320
+        ctrl_w, ctrl_h = 440, 520
         self.controls = ControlsPanel()
         self.controls.resize(ctrl_w, ctrl_h)
-        self.controls.move(right_x, screen.y() + margin)
+        self.controls.move(
+            *clamp_window_top_left(screen, right_x,
+                                   screen.y() + margin, ctrl_w, ctrl_h),
+        )
         self.controls.params_changed.connect(self._update)
-        self.controls.linear_changed.connect(self._on_linear_changed)
         self.controls.fit_requested.connect(self._on_fit_requested)
+
+        self._plot_timer = QTimer(self.controls)
+        self._plot_timer.setSingleShot(True)
+        self._plot_timer.timeout.connect(self._flush_plots)
+        self._plot_delay_ms = 60
+        self._plot_payload: tuple[
+            np.ndarray, np.ndarray, float, float, float, float, float, float,
+        ] | None = None
 
         hist_w, hist_h = 500, 350
         self.hist_plot = HistogramPlot()
         self.hist_plot.resize(hist_w, hist_h)
-        self.hist_plot.move(right_x, screen.y() + margin + ctrl_h + margin)
+        y_plots = screen.y() + margin + ctrl_h + margin
+        self.hist_plot.move(
+            *clamp_window_top_left(screen, right_x, y_plots, hist_w, hist_h),
+        )
 
         cdf_w, cdf_h = 500, 300
         self.cdf_plot = CdfPlot()
         self.cdf_plot.resize(cdf_w, cdf_h)
-        self.cdf_plot.move(right_x, screen.y() + margin +
-                           ctrl_h + margin + hist_h + margin)
+        # Stacking hist + cdf vertically often exceeds available height; place cdf beside hist when it fits.
+        cdf_x_side = right_x + hist_w + margin
+        fits_beside_hist = cdf_x_side + cdf_w <= screen.x() + screen.width() - margin
+        if fits_beside_hist:
+            cdf_x, cdf_y = cdf_x_side, y_plots
+        else:
+            cdf_x, cdf_y = right_x, y_plots + hist_h + margin
+        self.cdf_plot.move(
+            *clamp_window_top_left(screen, cdf_x, cdf_y, cdf_w, cdf_h),
+        )
 
         self.viewer.show()
         self.hist_plot.show()
         self.cdf_plot.show()
         self.controls.show()
 
-        self._raw_hists = [
-            compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
-        ]
         self._fit_and_apply_params()
-        self._update()
-
-    def _on_linear_changed(self, linear: bool) -> None:
-        if linear:
-            self._src_float = srgb_eotf(self._src_srgb)
-        else:
-            self._src_float = self._src_srgb.copy()
-        self._raw_hists = [
-            compute_histogram(self._src_float[:, :, ch]) for ch in range(3)
-        ]
-        self._fit_and_apply_params()
-        self._update()
+        self.viewer.set_alt_image(self._src_bgr)
+        self._update(sync_plots=True)
 
     def _on_fit_requested(self) -> None:
         self._fit_and_apply_params()
-        self._update()
+        self._update(sync_plots=True)
 
     def _fit_and_apply_params(self) -> None:
-        """Run the optimizer and push fitted values into sliders/colors."""
+        """Run the optimizer on OKLab L and push fitted values into L sliders."""
         cap_frac = self.controls.cap_frac.val
-        global_max = max(h.max() for h in self._raw_hists)
+        global_max = self._raw_hist_L.max()
         cap = cap_frac * global_max
-        capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
+        capped_L = cap_histogram(self._raw_hist_L, cap)
 
-        bgr_params = fit_initial_params(capped_hists)
-        decomposed = decompose_per_channel(bgr_params)
+        fitted = fit_initial_params(capped_L)
 
         ctrl = self.controls
-        slider_color_pairs = {
-            "t": (ctrl.t, ctrl.color_t),
-            "s": (ctrl.s, ctrl.color_s),
-            "c": (ctrl.c, ctrl.color_c),
-            "g": (ctrl.g, ctrl.color_g),
-            "black": (ctrl.black, ctrl.color_black),
-            "white": (ctrl.white, ctrl.color_white),
-        }
-
         ctrl.blockSignals(True)
-        for name, (slider, cbtn) in slider_color_pairs.items():
-            scalar, rgb = decomposed[name]
-            slider.set_val(scalar)
-            cbtn.set_rgb(rgb)
+        ctrl.t.set_val(fitted["t"])
+        ctrl.s.set_val(fitted["s"])
+        ctrl.c.set_val(fitted["c"])
+        ctrl.g.set_val(fitted["g"])
+        ctrl.black.set_val(fitted["black"])
+        ctrl.white.set_val(fitted["white"])
         ctrl.blockSignals(False)
 
-    @staticmethod
-    def _per_channel(scalar: float, color_rgb: tuple[float, float, float],
-                     ) -> tuple[float, float, float]:
-        """Multiply scalar by an RGB colour vector, returned in BGR order."""
-        r, g, b = color_rgb
-        return (scalar * b, scalar * g, scalar * r)
+    def _flush_plots(self) -> None:
+        if self._plot_payload is None:
+            return
+        rh, cl, t, s, c, g, b, w = self._plot_payload
+        self.hist_plot.update(rh, cl)
+        self.cdf_plot.update(cl, t, s, c, g, b, w)
 
-    def _update(self) -> None:
+    def _update(self, *, sync_plots: bool = False) -> None:
         cap_frac = self.controls.cap_frac.val
-        global_max = max(h.max() for h in self._raw_hists)
+        global_max = self._raw_hist_L.max()
         cap = cap_frac * global_max
-        capped_hists = [cap_histogram(h, cap) for h in self._raw_hists]
+        capped_L = cap_histogram(self._raw_hist_L, cap)
 
         ctrl = self.controls
-        t = self._per_channel(ctrl.t.val, ctrl.color_t.rgb)
-        s = self._per_channel(ctrl.s.val, ctrl.color_s.rgb)
-        c = self._per_channel(ctrl.c.val, ctrl.color_c.rgb)
-        g = self._per_channel(ctrl.g.val, ctrl.color_g.rgb)
-        black = self._per_channel(ctrl.black.val, ctrl.color_black.rgb)
-        white = self._per_channel(ctrl.white.val, ctrl.color_white.rgb)
+        t = ctrl.t.val
+        s = ctrl.s.val
+        c = ctrl.c.val
+        g = ctrl.g.val
+        black = ctrl.black.val
+        white = ctrl.white.val
 
-        out_float = apply_cdf_transform(
-            self._src_float, capped_hists, t, s, c, g, black, white,
+        L_out = apply_l_channel_cdf(
+            self._L, capped_L, t, s, c, g, black, white)
+
+        deg2rad = np.pi / 180.0
+        a2, b2 = chroma_offset_ab(
+            L_out,
+            self._a,
+            self._b_ok,
+            ctrl.sh_angle.val * deg2rad,
+            ctrl.sh_str.val,
+            ctrl.mid_angle.val * deg2rad,
+            ctrl.mid_str.val,
+            ctrl.hi_angle.val * deg2rad,
+            ctrl.hi_str.val,
         )
-        if ctrl.linear_check.isChecked():
-            out_float = srgb_oetf(np.clip(out_float, 0.0, 1.0))
-        out_bgr = (np.clip(out_float, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-        self.viewer.show_image(out_bgr)
-        self.viewer.set_alt_image(self._src_bgr)
-        self.hist_plot.update(self._raw_hists, capped_hists)
-        self.cdf_plot.update(capped_hists, t, s, c, g, black, white)
+        out_bgr = oklab_to_linear_bgr(L_out, a2, b2)
+        out_bgr = np.clip(out_bgr, 0.0, 1.0)
+        out_enc = srgb_oetf(out_bgr)
+        out_u8 = (out_enc * 255.0).astype(np.uint8)
+
+        self.viewer.show_image(out_u8)
+        self._plot_payload = (
+            self._raw_hist_L, capped_L, t, s, c, g, black, white,
+        )
+        if sync_plots:
+            self._plot_timer.stop()
+            self._flush_plots()
+        else:
+            self._plot_timer.start(self._plot_delay_ms)
 
 
 def main() -> None:

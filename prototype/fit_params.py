@@ -109,47 +109,17 @@ def _fit_single_channel(
 
 
 def fit_initial_params(
-    capped_hists: list[np.ndarray],
+    capped_hist: np.ndarray,
     steps: int = 1000,
     lr: float = 0.01,
-) -> list[dict[str, float]]:
-    """Fit target-CDF parameters for each BGR channel independently.
+) -> dict[str, float]:
+    """Fit target-CDF parameters to one channel's capped histogram (e.g. OKLab L).
 
-    *capped_hists* is a list of 3 histogram arrays (one per BGR channel).
-    Returns a list of 3 dicts, each mapping param name -> fitted value.
+    *capped_hist* is a 1D histogram array (e.g. 256 bins on [0, 1]).
+    Returns a dict mapping param name -> fitted value.
     """
-    results: list[dict[str, float]] = []
-    for hist in capped_hists:
-        cdf = np.cumsum(hist)
-        total = cdf[-1]
-        if total > 0:
-            cdf = cdf / total
-        fitted = _fit_single_channel(cdf, len(cdf), steps=steps, lr=lr)
-        results.append(fitted)
-    return results
-
-
-def decompose_per_channel(
-    bgr_params: list[dict[str, float]],
-) -> dict[str, tuple[float, tuple[float, float, float]]]:
-    """Decompose 3 per-channel param dicts into (scalar, rgb_color) pairs.
-
-    For each param name, the scalar is the value that keeps the colour vector
-    normalised (max component = 1).  The colour tuple is in RGB order (matching
-    the UI's ColorButton convention).  Channel order in *bgr_params* is BGR.
-    """
-    result: dict[str, tuple[float, tuple[float, float, float]]] = {}
-    for name in PARAM_NAMES:
-        b_val = bgr_params[0][name]
-        g_val = bgr_params[1][name]
-        r_val = bgr_params[2][name]
-        m = max(abs(r_val), abs(g_val), abs(b_val))
-        if m < 1e-12:
-            result[name] = (0.0, (1.0, 1.0, 1.0))
-        else:
-            sign = 1.0 if max(r_val, g_val, b_val) >= - \
-                min(r_val, g_val, b_val) else -1.0
-            scalar = sign * m
-            result[name] = (
-                scalar, (r_val / scalar, g_val / scalar, b_val / scalar))
-    return result
+    cdf = np.cumsum(capped_hist)
+    total = cdf[-1]
+    if total > 0:
+        cdf = cdf / total
+    return _fit_single_channel(cdf, len(cdf), steps=steps, lr=lr)
