@@ -7,17 +7,15 @@ dependency, directly portable to Kotlin / any other language.
 import numpy as np
 
 # Parameter names and their (min, max) bounds, mirroring the UI sliders.
-PARAM_NAMES = ("t", "s", "c", "g", "black", "white")
+# Black/white are excluded — they are independent post-CDF deltas, not fitted.
+PARAM_NAMES = ("t", "s", "c", "g")
 PARAM_BOUNDS = {
     "t": (0.01, 5.0),
     "s": (0.01, 5.0),
     "c": (0.01, 0.99),
     "g": (0.1, 3.0),
-    "black": (-0.2, 0.2),
-    "white": (0.8, 1.2),
 }
-PARAM_DEFAULTS = {"t": 1.0, "s": 1.0, "c": 0.5,
-                  "g": 1.0, "black": 0.0, "white": 1.0}
+PARAM_DEFAULTS = {"t": 1.0, "s": 1.0, "c": 0.5, "g": 1.0}
 
 
 def compute_target_cdf(
@@ -26,10 +24,8 @@ def compute_target_cdf(
     s: float,
     c: float,
     g: float,
-    black: float,
-    white: float,
 ) -> np.ndarray:
-    """Parametric target CDF — identical to the one in main.py."""
+    """Parametric target CDF — always maps [0, 1] → [0, 1]."""
     alpha = s * c / (s * c + t * (1.0 - c))
     beta = 1.0 - alpha
     h = np.where(
@@ -37,8 +33,7 @@ def compute_target_cdf(
         alpha * np.power(x / c, t),
         1.0 - beta * np.power((1.0 - x) / (1.0 - c), s),
     )
-    f = np.power(h, g)
-    return np.clip(black + f * (white - black), 0.0, 1.0)
+    return np.clip(np.power(h, g), 0.0, 1.0)
 
 
 def _pack(params: dict[str, float]) -> np.ndarray:
@@ -57,8 +52,7 @@ def _clamp_vec(vec: np.ndarray) -> np.ndarray:
 
 def _mse(x: np.ndarray, target_cdf: np.ndarray, params: np.ndarray) -> float:
     p = _unpack(params)
-    pred = compute_target_cdf(
-        x, p["t"], p["s"], p["c"], p["g"], p["black"], p["white"])
+    pred = compute_target_cdf(x, p["t"], p["s"], p["c"], p["g"])
     return float(np.mean((pred - target_cdf) ** 2))
 
 
@@ -108,18 +102,45 @@ def _fit_single_channel(
     return _unpack(params)
 
 
+def _trim_cdf(cdf: np.ndarray) -> np.ndarray:
+    """Extract the rising portion of a [0, 1]-normalized CDF.
+
+    Removes leading bins stuck at 0 and trailing bins stuck at 1,
+    then rescales the remaining range to [0, 1].  This lets the
+    shape fitter ignore dead zones at the histogram edges.
+    """
+    above_zero = cdf > 0.0
+    if not above_zero.any():
+        return cdf
+    first = int(np.argmax(above_zero))
+
+    below_one = cdf < 1.0
+    if not below_one.any():
+        return cdf
+    last = len(cdf) - 1 - int(np.argmax(below_one[::-1]))
+
+    trimmed = cdf[first : last + 1]
+    lo, hi = trimmed[0], trimmed[-1]
+    if hi > lo:
+        trimmed = (trimmed - lo) / (hi - lo)
+    return trimmed
+
+
 def fit_initial_params(
     capped_hist: np.ndarray,
     steps: int = 1000,
     lr: float = 0.01,
 ) -> dict[str, float]:
-    """Fit target-CDF parameters to one channel's capped histogram (e.g. OKLab L).
+    """Fit target-CDF shape parameters to one channel's capped histogram.
 
     *capped_hist* is a 1D histogram array (e.g. 256 bins on [0, 1]).
-    Returns a dict mapping param name -> fitted value.
+    The CDF is trimmed to its rising portion and normalized to [0, 1]
+    so the fitter only sees the actual tonal shape.
+    Returns a dict mapping param name -> fitted value (t, s, c, g only).
     """
     cdf = np.cumsum(capped_hist)
     total = cdf[-1]
     if total > 0:
         cdf = cdf / total
+    cdf = _trim_cdf(cdf)
     return _fit_single_channel(cdf, len(cdf), steps=steps, lr=lr)

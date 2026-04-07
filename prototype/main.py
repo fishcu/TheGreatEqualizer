@@ -123,15 +123,13 @@ def compute_target_cdf(
     s: float,
     c: float,
     g: float,
-    black: float,
-    white: float,
 ) -> np.ndarray:
     """Evaluate the parametric target CDF at positions *x* (in [0, 1]).
 
-    The inner curve h(x) is a piecewise power function joined at *c*,
+    The curve h(x) is a piecewise power function joined at *c*,
     shaped by *t* (shadow exponent) and *s* (highlight exponent), with
-    continuity ensured by the alpha/beta weighting.  The final curve
-    is h(x)**g, linearly mapped from [0,1] to [black, white] and clamped.
+    continuity ensured by the alpha/beta weighting.  Always maps
+    [0, 1] → [0, 1]; black/white deltas are applied separately.
     """
     alpha = s * c / (s * c + t * (1.0 - c))
     beta = 1.0 - alpha
@@ -141,8 +139,7 @@ def compute_target_cdf(
         alpha * np.power(x / c, t),
         1.0 - beta * np.power((1.0 - x) / (1.0 - c), s),
     )
-    f = np.power(h, g)
-    return np.clip(black + f * (white - black), 0.0, 1.0)
+    return np.clip(np.power(h, g), 0.0, 1.0)
 
 
 def apply_l_channel_cdf(
@@ -155,19 +152,23 @@ def apply_l_channel_cdf(
     black: float,
     white: float,
 ) -> np.ndarray:
-    """Histogram specification on scalar OKLab L (input clipped to [0, 1] for LUT)."""
+    """Histogram specification on scalar OKLab L (input clipped to [0, 1] for LUT).
+
+    The CDF transfer always maps into [0, 1].  Black/white deltas then
+    linearly remap the output range to [black, 1 + white].
+    """
     bin_centers = np.linspace(0.0, 1.0, NUM_BINS)
     target_x = np.linspace(0.0, 1.0, 4096)
-    target_y = compute_target_cdf(
-        target_x, t, s, c, g, black, white,
-    )
+    target_y = compute_target_cdf(target_x, t, s, c, g)
     input_cdf = np.cumsum(capped_hist)
     total = input_cdf[-1]
     if total > 0:
         input_cdf /= total
     transfer = np.interp(input_cdf, target_y, target_x)
     L_in = np.clip(L, 0.0, 1.0)
-    return np.clip(np.interp(L_in, bin_centers, transfer), 0.0, 1.0).astype(L.dtype)
+    L_mapped = np.interp(L_in, bin_centers, transfer)
+    L_out = black + L_mapped * (1.0 + white - black)
+    return np.clip(L_out, 0.0, 1.0).astype(L.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -283,8 +284,6 @@ class CdfPlot(QMainWindow):
         s: float,
         c: float,
         g: float,
-        black: float,
-        white: float,
     ) -> None:
         ax_in = self._ax_in
         ax_in.clear()
@@ -295,18 +294,32 @@ class CdfPlot(QMainWindow):
         ax_in.plot(self._hist_bins, cdf, color="black",
                    linewidth=0.9, alpha=0.85)
         ax_in.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
+
+        above_zero = cdf > 0.0
+        below_one = cdf < 1.0
+        if above_zero.any() and below_one.any():
+            x_lo = self._hist_bins[int(np.argmax(above_zero))]
+            x_hi = self._hist_bins[
+                len(cdf) - 1 - int(np.argmax(below_one[::-1]))
+            ]
+            for xv in (x_lo, x_hi):
+                ax_in.axvline(xv, color="steelblue", linewidth=0.7,
+                              linestyle="--", alpha=0.8)
+            ax_in.set_title(
+                f"Input CDF (L)  trim [{x_lo:.2f}, {x_hi:.2f}]", fontsize=9,
+            )
+        else:
+            ax_in.set_title("Input CDF (L)", fontsize=9)
+
         ax_in.set_xlim(0, 1)
         ax_in.set_ylim(0, 1)
         ax_in.set_aspect("equal")
         ax_in.set_xlabel("L")
         ax_in.set_ylabel("CDF")
-        ax_in.set_title("Input CDF (L)", fontsize=9)
 
         ax_tgt = self._ax_tgt
         ax_tgt.clear()
-        target = compute_target_cdf(
-            self._cdf_x, t, s, c, g, black, white,
-        )
+        target = compute_target_cdf(self._cdf_x, t, s, c, g)
         ax_tgt.plot(self._cdf_x, target, color="darkgreen",
                     linewidth=1.1, alpha=0.9)
         ax_tgt.plot([0, 1], [0, 1], color="gray",
@@ -411,7 +424,7 @@ class ControlsPanel(QWidget):
         self.c = LabeledSlider("c", 0.01, 0.99, 0.5)
         self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
         self.black = LabeledSlider("black", -0.2, 0.2, 0.0)
-        self.white = LabeledSlider("white", 0.8, 1.2, 1.0)
+        self.white = LabeledSlider("white", -0.2, 0.2, 0.0)
 
         for slider in (self.t, self.s, self.c, self.g, self.black, self.white):
             layout.addWidget(slider)
@@ -486,7 +499,7 @@ class App:
         self._plot_timer.timeout.connect(self._flush_plots)
         self._plot_delay_ms = 60
         self._plot_payload: tuple[
-            np.ndarray, np.ndarray, float, float, float, float, float, float,
+            np.ndarray, np.ndarray, float, float, float, float,
         ] | None = None
 
         hist_w, hist_h = 500, 350
@@ -525,7 +538,7 @@ class App:
         self._update(sync_plots=True)
 
     def _fit_and_apply_params(self) -> None:
-        """Run the optimizer on OKLab L and push fitted values into L sliders."""
+        """Run the optimizer on OKLab L and push fitted values into shape sliders."""
         cap_frac = self.controls.cap_frac.val
         global_max = self._raw_hist_L.max()
         cap = cap_frac * global_max
@@ -539,16 +552,14 @@ class App:
         ctrl.s.set_val(fitted["s"])
         ctrl.c.set_val(fitted["c"])
         ctrl.g.set_val(fitted["g"])
-        ctrl.black.set_val(fitted["black"])
-        ctrl.white.set_val(fitted["white"])
         ctrl.blockSignals(False)
 
     def _flush_plots(self) -> None:
         if self._plot_payload is None:
             return
-        rh, cl, t, s, c, g, b, w = self._plot_payload
+        rh, cl, t, s, c, g = self._plot_payload
         self.hist_plot.update(rh, cl)
-        self.cdf_plot.update(cl, t, s, c, g, b, w)
+        self.cdf_plot.update(cl, t, s, c, g)
 
     def _update(self, *, sync_plots: bool = False) -> None:
         cap_frac = self.controls.cap_frac.val
@@ -587,7 +598,7 @@ class App:
 
         self.viewer.show_image(out_u8)
         self._plot_payload = (
-            self._raw_hist_L, capped_L, t, s, c, g, black, white,
+            self._raw_hist_L, capped_L, t, s, c, g,
         )
         if sync_plots:
             self._plot_timer.stop()
