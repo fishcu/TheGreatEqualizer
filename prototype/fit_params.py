@@ -105,29 +105,41 @@ def _fit_single_channel(
 _TRIM_EPS = 5e-3
 
 
-def _trim_cdf(cdf: np.ndarray, eps: float = _TRIM_EPS) -> np.ndarray:
+def _trim_cdf(
+    cdf: np.ndarray,
+    num_bins: int,
+    eps: float = _TRIM_EPS,
+) -> tuple[np.ndarray, float, float]:
     """Extract the rising portion of a [0, 1]-normalized CDF.
 
     Removes leading bins where CDF < *eps* and trailing bins where
     CDF > 1 - *eps*, then rescales the remaining range to [0, 1].
     This lets the shape fitter ignore sparse outlier pixels at the
     histogram edges that would otherwise prevent effective trimming.
+
+    Returns (trimmed_cdf, x_lo, x_hi) where x_lo and x_hi are the
+    positions in [0, 1] of the trim boundaries.
     """
+    bins = np.linspace(0.0, 1.0, num_bins)
+
     above_lo = cdf > eps
     if not above_lo.any():
-        return cdf
+        return cdf, 0.0, 1.0
     first = int(np.argmax(above_lo))
 
     below_hi = cdf < 1.0 - eps
     if not below_hi.any():
-        return cdf
+        return cdf, 0.0, 1.0
     last = len(cdf) - 1 - int(np.argmax(below_hi[::-1]))
 
-    trimmed = cdf[first : last + 1]
+    x_lo = float(bins[first])
+    x_hi = float(bins[last])
+
+    trimmed = cdf[first: last + 1]
     lo, hi = trimmed[0], trimmed[-1]
     if hi > lo:
         trimmed = (trimmed - lo) / (hi - lo)
-    return trimmed
+    return trimmed, x_lo, x_hi
 
 
 def fit_initial_params(
@@ -140,11 +152,16 @@ def fit_initial_params(
     *capped_hist* is a 1D histogram array (e.g. 256 bins on [0, 1]).
     The CDF is trimmed to its rising portion and normalized to [0, 1]
     so the fitter only sees the actual tonal shape.
-    Returns a dict mapping param name -> fitted value (t, s, c, g only).
+
+    Returns a dict with fitted shape values (t, s, c, g) and the trim
+    boundaries (x_lo, x_hi) used to remove flat CDF tails.
     """
     cdf = np.cumsum(capped_hist)
     total = cdf[-1]
     if total > 0:
         cdf = cdf / total
-    cdf = _trim_cdf(cdf)
-    return _fit_single_channel(cdf, len(cdf), steps=steps, lr=lr)
+    trimmed, x_lo, x_hi = _trim_cdf(cdf, len(cdf))
+    result = _fit_single_channel(trimmed, len(trimmed), steps=steps, lr=lr)
+    result["x_lo"] = x_lo
+    result["x_hi"] = x_hi
+    return result

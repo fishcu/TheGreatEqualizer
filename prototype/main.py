@@ -159,8 +159,16 @@ def apply_channel_cdf(
 ) -> np.ndarray:
     """Histogram specification on a [0, 1] scalar channel.
 
-    The CDF transfer always maps into [0, 1].  Black/white deltas then
-    linearly remap the output range to [black, 1 + white].
+    The core of the transfer curve (between the trim boundaries) is
+    determined by CDF matching and maps to [0, 1].  Outside the trim
+    boundaries the transfer ramps linearly to values chosen so that
+    the subsequent affine remap (black / white) produces identity in
+    the tails — preserving specular highlights and deep shadows.
+
+    When black and white are set to the trim thresholds (the fitted
+    default), the full output spans [0, 1] with approximate identity
+    everywhere.  Adjusting black/white shifts the core output range
+    while the tails stay continuous and differentiated.
     """
     bin_centers = np.linspace(0.0, 1.0, NUM_BINS)
     target_x = np.linspace(0.0, 1.0, 4096)
@@ -169,10 +177,32 @@ def apply_channel_cdf(
     total = input_cdf[-1]
     if total > 0:
         input_cdf /= total
+
     transfer = np.interp(input_cdf, target_y, target_x)
+
+    span = 1.0 + white - black
+    above_lo = input_cdf > _TRIM_EPS
+    below_hi = input_cdf < 1.0 - _TRIM_EPS
+    if above_lo.any() and below_hi.any() and span > 1e-10:
+        first = int(np.argmax(above_lo))
+        last = NUM_BINS - 1 - int(np.argmax(below_hi[::-1]))
+
+        lo_target = -black / span
+        hi_target = (1.0 - black) / span
+
+        if first > 0:
+            transfer[:first] = np.linspace(
+                lo_target, transfer[first], first, endpoint=False,
+            )
+        if last < NUM_BINS - 1:
+            n_upper = NUM_BINS - 1 - last
+            transfer[last + 1:] = np.linspace(
+                transfer[last], hi_target, n_upper + 1,
+            )[1:]
+
     L_in = np.clip(L, 0.0, 1.0)
     L_mapped = np.interp(L_in, bin_centers, transfer)
-    L_out = black + L_mapped * (1.0 + white - black)
+    L_out = black + L_mapped * span
     return np.clip(L_out, 0.0, 1.0).astype(L.dtype)
 
 
@@ -553,8 +583,8 @@ class ControlsPanel(QWidget):
         self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
         self.c = LabeledSlider("c", 0.01, 0.99, 0.5)
         self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
-        self.black = LabeledSlider("black", -0.2, 0.2, 0.0)
-        self.white = LabeledSlider("white", -0.2, 0.2, 0.0)
+        self.black = LabeledSlider("black", -0.2, 1.0, 0.0)
+        self.white = LabeledSlider("white", -1.0, 0.2, 0.0)
 
         for slider in (self.t, self.s, self.c, self.g, self.black, self.white):
             layout.addWidget(slider)
@@ -576,8 +606,8 @@ class ControlsPanel(QWidget):
         self.sc = LabeledSlider("s", 0.01, 5.0, 1.0)
         self.cc = LabeledSlider("c", 0.01, 0.99, 0.5)
         self.gc = LabeledSlider("g", 0.1, 3.0, 1.0)
-        self.black_c = LabeledSlider("black", -0.2, 0.2, 0.0)
-        self.white_c = LabeledSlider("white", -0.2, 0.2, 0.0)
+        self.black_c = LabeledSlider("black", -0.2, 1.0, 0.0)
+        self.white_c = LabeledSlider("white", -1.0, 0.2, 0.0)
 
         for slider in (self.tc, self.sc, self.cc, self.gc,
                        self.black_c, self.white_c):
@@ -730,6 +760,8 @@ class App:
         ctrl.s.set_val(fitted["s"])
         ctrl.c.set_val(fitted["c"])
         ctrl.g.set_val(fitted["g"])
+        ctrl.black.set_val(fitted["x_lo"])
+        ctrl.white.set_val(fitted["x_hi"] - 1.0)
         ctrl.blockSignals(False)
 
     def _fit_C(self) -> None:
@@ -745,6 +777,8 @@ class App:
         ctrl.sc.set_val(fitted["s"])
         ctrl.cc.set_val(fitted["c"])
         ctrl.gc.set_val(fitted["g"])
+        ctrl.black_c.set_val(fitted["x_lo"])
+        ctrl.white_c.set_val(fitted["x_hi"] - 1.0)
         ctrl.blockSignals(False)
 
     def _flush_plots(self) -> None:
