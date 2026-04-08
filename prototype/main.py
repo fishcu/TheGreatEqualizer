@@ -25,6 +25,8 @@ from oklab import (
     gamut_clamp_ab,
     linear_bgr_to_oklab,
     oklab_to_linear_bgr,
+    reconstruct_ab,
+    relative_chroma,
     zone_weights_cdf,
 )
 from fit_params import fit_initial_params
@@ -145,7 +147,7 @@ def compute_target_cdf(
     return np.clip(np.power(h, g), 0.0, 1.0)
 
 
-def apply_l_channel_cdf(
+def apply_channel_cdf(
     L: np.ndarray,
     capped_hist: np.ndarray,
     t: float,
@@ -155,7 +157,7 @@ def apply_l_channel_cdf(
     black: float,
     white: float,
 ) -> np.ndarray:
-    """Histogram specification on scalar OKLab L (input clipped to [0, 1] for LUT).
+    """Histogram specification on a [0, 1] scalar channel.
 
     The CDF transfer always maps into [0, 1].  Black/white deltas then
     linearly remap the output range to [black, 1 + white].
@@ -238,65 +240,71 @@ class ImageViewer(QMainWindow):
 
 
 class HistogramPlot(QMainWindow):
-    """Window with raw and capped OKLab L histograms stacked vertically."""
+    """Window with raw/capped histograms for OKLab L and relative chroma."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Histograms (OKLab L)")
-        self._fig = matplotlib.figure.Figure(figsize=(6, 4), tight_layout=True)
-        self._ax_raw, self._ax_cap = self._fig.subplots(2, 1, sharex=True)
+        self.setWindowTitle("Histograms (L + C_rel)")
+        self._fig = matplotlib.figure.Figure(
+            figsize=(10, 5), tight_layout=True)
+        self._axes = self._fig.subplots(2, 2, sharex=True)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self.setCentralWidget(self._canvas)
         self._bins = np.linspace(0.0, 1.0, NUM_BINS)
 
     def update(
         self,
-        raw_hist: np.ndarray,
-        capped_hist: np.ndarray,
+        raw_L: np.ndarray,
+        capped_L: np.ndarray,
+        raw_C: np.ndarray,
+        capped_C: np.ndarray,
     ) -> None:
-        for ax, hist, title in (
-            (self._ax_raw, raw_hist, "Raw L"),
-            (self._ax_cap, capped_hist, "Capped L"),
-        ):
+        items = (
+            (self._axes[0, 0], raw_L, "Raw L", "black"),
+            (self._axes[1, 0], capped_L, "Capped L", "black"),
+            (self._axes[0, 1], raw_C, "Raw C_rel", "teal"),
+            (self._axes[1, 1], capped_C, "Capped C_rel", "teal"),
+        )
+        for ax, hist, title, color in items:
             ax.clear()
-            ax.plot(self._bins, hist, color="black", linewidth=0.8, alpha=0.85)
+            ax.plot(self._bins, hist, color=color, linewidth=0.8, alpha=0.85)
             ax.set_xlim(0, 1)
             ax.set_ylabel("count")
             ax.set_title(title, fontsize=9)
-        self._ax_cap.set_xlabel("OKLab L (clipped to [0,1] for bins)")
+        self._axes[1, 0].set_xlabel("OKLab L")
+        self._axes[1, 1].set_xlabel("C / C_max")
         self._canvas.draw_idle()
 
 
 class CdfPlot(QMainWindow):
-    """Window with input L CDF and parametric target CDF side by side."""
+    """Window with input/target CDFs for L and relative chroma."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("CDFs (OKLab L)")
-        self._fig = matplotlib.figure.Figure(figsize=(8, 4), tight_layout=True)
-        self._ax_in, self._ax_tgt = self._fig.subplots(1, 2)
+        self.setWindowTitle("CDFs (L + C_rel)")
+        self._fig = matplotlib.figure.Figure(figsize=(8, 7), tight_layout=True)
+        self._axes = self._fig.subplots(2, 2)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self.setCentralWidget(self._canvas)
         self._hist_bins = np.linspace(0.0, 1.0, NUM_BINS)
         self._cdf_x = np.linspace(0.0, 1.0, 1024)
 
-    def update(
+    def _draw_input_cdf(
         self,
+        ax,
         capped_hist: np.ndarray,
-        t: float,
-        s: float,
-        c: float,
-        g: float,
+        label: str,
+        color: str,
+        vline_color: str,
     ) -> None:
-        ax_in = self._ax_in
-        ax_in.clear()
+        ax.clear()
         cdf = np.cumsum(capped_hist)
         total = cdf[-1]
         if total > 0:
             cdf /= total
-        ax_in.plot(self._hist_bins, cdf, color="black",
-                   linewidth=0.9, alpha=0.85)
-        ax_in.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
+        ax.plot(self._hist_bins, cdf, color=color,
+                linewidth=0.9, alpha=0.85)
+        ax.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
 
         above_zero = cdf > 0.0
         below_one = cdf < 1.0
@@ -306,33 +314,64 @@ class CdfPlot(QMainWindow):
                 len(cdf) - 1 - int(np.argmax(below_one[::-1]))
             ]
             for xv in (x_lo, x_hi):
-                ax_in.axvline(xv, color="steelblue", linewidth=0.7,
-                              linestyle="--", alpha=0.8)
-            ax_in.set_title(
-                f"Input CDF (L)  trim [{x_lo:.2f}, {x_hi:.2f}]", fontsize=9,
+                ax.axvline(xv, color=vline_color, linewidth=0.7,
+                           linestyle="--", alpha=0.8)
+            ax.set_title(
+                f"Input CDF ({label})  trim [{x_lo:.2f}, {x_hi:.2f}]",
+                fontsize=9,
             )
         else:
-            ax_in.set_title("Input CDF (L)", fontsize=9)
+            ax.set_title(f"Input CDF ({label})", fontsize=9)
 
-        ax_in.set_xlim(0, 1)
-        ax_in.set_ylim(0, 1)
-        ax_in.set_aspect("equal")
-        ax_in.set_xlabel("L")
-        ax_in.set_ylabel("CDF")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
+        ax.set_xlabel(label)
+        ax.set_ylabel("CDF")
 
-        ax_tgt = self._ax_tgt
-        ax_tgt.clear()
+    def _draw_target_cdf(
+        self,
+        ax,
+        t: float,
+        s: float,
+        c: float,
+        g: float,
+        label: str,
+        color: str,
+    ) -> None:
+        ax.clear()
         target = compute_target_cdf(self._cdf_x, t, s, c, g)
-        ax_tgt.plot(self._cdf_x, target, color="darkgreen",
-                    linewidth=1.1, alpha=0.9)
-        ax_tgt.plot([0, 1], [0, 1], color="gray",
-                    linewidth=0.5, linestyle="--")
-        ax_tgt.set_xlim(0, 1)
-        ax_tgt.set_ylim(0, 1)
-        ax_tgt.set_aspect("equal")
-        ax_tgt.set_xlabel("L")
-        ax_tgt.set_title("Target CDF (L)", fontsize=9)
+        ax.plot(self._cdf_x, target, color=color,
+                linewidth=1.1, alpha=0.9)
+        ax.plot([0, 1], [0, 1], color="gray",
+                linewidth=0.5, linestyle="--")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
+        ax.set_xlabel(label)
+        ax.set_title(f"Target CDF ({label})", fontsize=9)
 
+    def update(
+        self,
+        capped_L: np.ndarray,
+        t: float,
+        s: float,
+        c: float,
+        g: float,
+        capped_C: np.ndarray,
+        tc: float,
+        sc: float,
+        cc: float,
+        gc: float,
+    ) -> None:
+        self._draw_input_cdf(
+            self._axes[0, 0], capped_L, "L", "black", "steelblue")
+        self._draw_target_cdf(
+            self._axes[0, 1], t, s, c, g, "L", "darkgreen")
+        self._draw_input_cdf(
+            self._axes[1, 0], capped_C, "C_rel", "teal", "darkorange")
+        self._draw_target_cdf(
+            self._axes[1, 1], tc, sc, cc, gc, "C_rel", "darkorange")
         self._canvas.draw_idle()
 
 
@@ -460,7 +499,8 @@ class ControlsPanel(QWidget):
     """Separate window holding luminance CDF sliders and zone chroma offsets."""
 
     params_changed = Signal()
-    fit_requested = Signal()
+    fit_L_requested = Signal()
+    fit_C_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -468,17 +508,17 @@ class ControlsPanel(QWidget):
 
         layout = QVBoxLayout()
 
-        self.fit_btn = QPushButton("Fit to input L CDF")
-        layout.addWidget(self.fit_btn)
-        self.fit_btn.clicked.connect(self.fit_requested.emit)
+        lum_label = QLabel("Luminance (target CDF on OKLab L)")
+        layout.addWidget(lum_label)
 
         self.cap_frac = LabeledSlider("cap", 0.0, 1.0, 1.0)
         layout.addWidget(self.cap_frac)
         self.cap_frac.value_changed.connect(
             lambda _: self.params_changed.emit())
 
-        lum_label = QLabel("Luminance (target CDF on OKLab L)")
-        layout.addWidget(lum_label)
+        self.fit_btn = QPushButton("Fit to input L CDF")
+        layout.addWidget(self.fit_btn)
+        self.fit_btn.clicked.connect(self.fit_L_requested.emit)
 
         self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
         self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
@@ -488,6 +528,30 @@ class ControlsPanel(QWidget):
         self.white = LabeledSlider("white", -0.2, 0.2, 0.0)
 
         for slider in (self.t, self.s, self.c, self.g, self.black, self.white):
+            layout.addWidget(slider)
+            slider.value_changed.connect(lambda _: self.params_changed.emit())
+
+        crel_label = QLabel("Relative Chroma (target CDF on C / C_max)")
+        layout.addWidget(crel_label)
+
+        self.cap_frac_c = LabeledSlider("cap", 0.0, 1.0, 1.0)
+        layout.addWidget(self.cap_frac_c)
+        self.cap_frac_c.value_changed.connect(
+            lambda _: self.params_changed.emit())
+
+        self.fit_btn_c = QPushButton("Fit to input C_rel CDF")
+        layout.addWidget(self.fit_btn_c)
+        self.fit_btn_c.clicked.connect(self.fit_C_requested.emit)
+
+        self.tc = LabeledSlider("t", 0.01, 5.0, 1.0)
+        self.sc = LabeledSlider("s", 0.01, 5.0, 1.0)
+        self.cc = LabeledSlider("c", 0.01, 0.99, 0.5)
+        self.gc = LabeledSlider("g", 0.1, 3.0, 1.0)
+        self.black_c = LabeledSlider("black", -0.2, 0.2, 0.0)
+        self.white_c = LabeledSlider("white", -0.2, 0.2, 0.0)
+
+        for slider in (self.tc, self.sc, self.cc, self.gc,
+                       self.black_c, self.white_c):
             layout.addWidget(slider)
             slider.value_changed.connect(lambda _: self.params_changed.emit())
 
@@ -530,6 +594,9 @@ class App:
         self._L, self._a, self._b_ok = linear_bgr_to_oklab(src_linear)
         self._gamut_lut = build_gamut_lut()
         self._raw_hist_L = compute_histogram(np.clip(self._L, 0.0, 1.0))
+        self._C_rel, self._h = relative_chroma(
+            self._L, self._a, self._b_ok, self._gamut_lut)
+        self._raw_hist_C = compute_histogram(self._C_rel)
 
         screen = QApplication.primaryScreen().availableGeometry()
         default_w = min(src_bgr.shape[1], int(screen.width() * 0.55))
@@ -546,7 +613,7 @@ class App:
             ),
         )
 
-        ctrl_w, ctrl_h = 440, 520
+        ctrl_w, ctrl_h = 440, 780
         self.controls = ControlsPanel()
         self.controls.resize(ctrl_w, ctrl_h)
         self.controls.move(
@@ -554,7 +621,8 @@ class App:
                                    screen.y() + margin, ctrl_w, ctrl_h),
         )
         self.controls.params_changed.connect(self._update)
-        self.controls.fit_requested.connect(self._on_fit_requested)
+        self.controls.fit_L_requested.connect(self._on_fit_L_requested)
+        self.controls.fit_C_requested.connect(self._on_fit_C_requested)
 
         self._plot_timer = QTimer(self.controls)
         self._plot_timer.setSingleShot(True)
@@ -562,13 +630,14 @@ class App:
         self._plot_delay_ms = 60
         self._plot_payload: tuple[
             np.ndarray, np.ndarray, float, float, float, float,
+            np.ndarray, np.ndarray, float, float, float, float,
         ] | None = None
         self._zone_payload: tuple[
             np.ndarray, np.ndarray, np.ndarray,
             np.ndarray, np.ndarray,
         ] | None = None
 
-        hist_w, hist_h = 500, 350
+        hist_w, hist_h = 720, 400
         self.hist_plot = HistogramPlot()
         self.hist_plot.resize(hist_w, hist_h)
         y_plots = screen.y() + margin + ctrl_h + margin
@@ -576,7 +645,7 @@ class App:
             *clamp_window_top_left(screen, right_x, y_plots, hist_w, hist_h),
         )
 
-        cdf_w, cdf_h = 500, 300
+        cdf_w, cdf_h = 600, 520
         self.cdf_plot = CdfPlot()
         self.cdf_plot.resize(cdf_w, cdf_h)
         # Stacking hist + cdf vertically often exceeds available height; place cdf beside hist when it fits.
@@ -606,19 +675,22 @@ class App:
         self.zone_debug.show()
         self.controls.show()
 
-        self._fit_and_apply_params()
+        self._fit_L()
+        self._fit_C()
         self.viewer.set_alt_image(self._src_bgr)
         self._update(sync_plots=True)
 
-    def _on_fit_requested(self) -> None:
-        self._fit_and_apply_params()
+    def _on_fit_L_requested(self) -> None:
+        self._fit_L()
         self._update(sync_plots=True)
 
-    def _fit_and_apply_params(self) -> None:
+    def _on_fit_C_requested(self) -> None:
+        self._fit_C()
+        self._update(sync_plots=True)
+
+    def _fit_L(self) -> None:
         """Run the optimizer on OKLab L and push fitted values into shape sliders."""
-        cap_frac = self.controls.cap_frac.val
-        global_max = self._raw_hist_L.max()
-        cap = cap_frac * global_max
+        cap = self.controls.cap_frac.val * self._raw_hist_L.max()
         capped_L = cap_histogram(self._raw_hist_L, cap)
 
         fitted = fit_initial_params(capped_L)
@@ -631,21 +703,36 @@ class App:
         ctrl.g.set_val(fitted["g"])
         ctrl.blockSignals(False)
 
+    def _fit_C(self) -> None:
+        """Run the optimizer on relative chroma and push fitted values into chroma shape sliders."""
+        cap = self.controls.cap_frac_c.val * self._raw_hist_C.max()
+        capped_C = cap_histogram(self._raw_hist_C, cap)
+
+        fitted = fit_initial_params(capped_C)
+
+        ctrl = self.controls
+        ctrl.blockSignals(True)
+        ctrl.tc.set_val(fitted["t"])
+        ctrl.sc.set_val(fitted["s"])
+        ctrl.cc.set_val(fitted["c"])
+        ctrl.gc.set_val(fitted["g"])
+        ctrl.blockSignals(False)
+
     def _flush_plots(self) -> None:
         if self._plot_payload is not None:
-            rh, cl, t, s, c, g = self._plot_payload
-            self.hist_plot.update(rh, cl)
-            self.cdf_plot.update(cl, t, s, c, g)
+            (rh_L, cl_L, t, s, c, g,
+             rh_C, cl_C, tc, sc, cc, gc) = self._plot_payload
+            self.hist_plot.update(rh_L, cl_L, rh_C, cl_C)
+            self.cdf_plot.update(cl_L, t, s, c, g, cl_C, tc, sc, cc, gc)
         if self._zone_payload is not None:
             self.zone_debug.update(*self._zone_payload)
 
     def _update(self, *, sync_plots: bool = False) -> None:
-        cap_frac = self.controls.cap_frac.val
-        global_max = self._raw_hist_L.max()
-        cap = cap_frac * global_max
-        capped_L = cap_histogram(self._raw_hist_L, cap)
-
         ctrl = self.controls
+
+        cap_L = ctrl.cap_frac.val * self._raw_hist_L.max()
+        capped_L = cap_histogram(self._raw_hist_L, cap_L)
+
         t = ctrl.t.val
         s = ctrl.s.val
         c = ctrl.c.val
@@ -653,8 +740,24 @@ class App:
         black = ctrl.black.val
         white = ctrl.white.val
 
-        L_out = apply_l_channel_cdf(
+        L_out = apply_channel_cdf(
             self._L, capped_L, t, s, c, g, black, white)
+
+        cap_C = ctrl.cap_frac_c.val * self._raw_hist_C.max()
+        capped_C = cap_histogram(self._raw_hist_C, cap_C)
+
+        tc = ctrl.tc.val
+        sc = ctrl.sc.val
+        cc = ctrl.cc.val
+        gc = ctrl.gc.val
+        black_c = ctrl.black_c.val
+        white_c = ctrl.white_c.val
+
+        C_rel_out = apply_channel_cdf(
+            self._C_rel, capped_C, tc, sc, cc, gc, black_c, white_c)
+
+        a2, b2 = reconstruct_ab(
+            C_rel_out, self._h, L_out, self._gamut_lut)
 
         cdf_bins = np.linspace(0.0, 1.0, NUM_BINS)
         out_hist = compute_histogram(np.clip(L_out, 0.0, 1.0))
@@ -667,8 +770,8 @@ class App:
 
         deg2rad = np.pi / 180.0
         a2, b2 = chroma_offset_ab(
-            self._a,
-            self._b_ok,
+            a2,
+            b2,
             w_s, w_m, w_h,
             ctrl.sh_angle.val * deg2rad,
             ctrl.sh_str.val,
@@ -687,6 +790,7 @@ class App:
         self.viewer.show_image(out_u8)
         self._plot_payload = (
             self._raw_hist_L, capped_L, t, s, c, g,
+            self._raw_hist_C, capped_C, tc, sc, cc, gc,
         )
         self._zone_payload = (w_s, w_m, w_h, cdf_bins, out_cdf)
         if sync_plots:

@@ -87,7 +87,8 @@ def build_gamut_lut(n_L: int = 256, n_h: int = 360) -> np.ndarray:
     RGB in [0, 1].
     """
     L_vals = np.linspace(0.0, 1.0, n_L, dtype=np.float32)
-    h_vals = np.linspace(0.0, 2.0 * np.pi, n_h, endpoint=False, dtype=np.float32)
+    h_vals = np.linspace(0.0, 2.0 * np.pi, n_h,
+                         endpoint=False, dtype=np.float32)
     L_grid, h_grid = np.meshgrid(L_vals, h_vals, indexing="ij")
     cos_h = np.cos(h_grid)
     sin_h = np.sin(h_grid)
@@ -106,21 +107,16 @@ def build_gamut_lut(n_L: int = 256, n_h: int = 360) -> np.ndarray:
     return lo
 
 
-def gamut_clamp_ab(
+def _lookup_gamut_max(
     L: np.ndarray,
-    a: np.ndarray,
-    b_ok: np.ndarray,
+    h: np.ndarray,
     gamut_lut: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Reduce chroma to stay inside the sRGB gamut while preserving L and hue.
+) -> np.ndarray:
+    """Bilinear interpolation of max chroma from the pre-computed gamut LUT.
 
-    Uses bilinear interpolation (with hue-wrapping) into *gamut_lut* built
-    by :func:`build_gamut_lut`.
+    *h* is the hue angle in radians (wraps automatically).
     """
     n_L, n_h = gamut_lut.shape
-    C = np.sqrt(a * a + b_ok * b_ok)
-    h = np.arctan2(b_ok, a) % (2.0 * np.pi)
-
     li_f = np.clip(L, 0.0, 1.0) * (n_L - 1)
     hi_f = h * (n_h / (2.0 * np.pi))
 
@@ -132,16 +128,56 @@ def gamut_clamp_ab(
     hi1 = (hi0 + 1) % n_h
     fh = (hi_f - np.floor(hi_f)).astype(np.float32)
 
-    max_C = (
+    return (
         gamut_lut[li0, hi0] * (1 - fl) * (1 - fh)
         + gamut_lut[li0, hi1] * (1 - fl) * fh
         + gamut_lut[li1, hi0] * fl * (1 - fh)
         + gamut_lut[li1, hi1] * fl * fh
     )
 
+
+def gamut_clamp_ab(
+    L: np.ndarray,
+    a: np.ndarray,
+    b_ok: np.ndarray,
+    gamut_lut: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce chroma to stay inside the sRGB gamut while preserving L and hue."""
+    C = np.sqrt(a * a + b_ok * b_ok)
+    h = np.arctan2(b_ok, a) % (2.0 * np.pi)
+    max_C = _lookup_gamut_max(L, h, gamut_lut)
     C_safe = np.maximum(C, 1e-10)
     scale = np.where(C > 1e-10, np.minimum(max_C / C_safe, 1.0), 1.0)
     return a * scale, b_ok * scale
+
+
+def relative_chroma(
+    L: np.ndarray,
+    a: np.ndarray,
+    b_ok: np.ndarray,
+    gamut_lut: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pixel chroma as a fraction of the sRGB gamut boundary.
+
+    Returns (C_rel, h) where C_rel = C / C_max(L, h) clipped to [0, 1]
+    and h is the hue angle in radians.
+    """
+    C = np.sqrt(a * a + b_ok * b_ok)
+    h = np.arctan2(b_ok, a) % (2.0 * np.pi)
+    C_max = _lookup_gamut_max(L, h, gamut_lut)
+    C_rel = np.where(C_max > 1e-10, C / C_max, np.float32(0.0))
+    return np.clip(C_rel, 0.0, 1.0).astype(np.float32), h.astype(np.float32)
+
+
+def reconstruct_ab(
+    C_rel: np.ndarray,
+    h: np.ndarray,
+    L: np.ndarray,
+    gamut_lut: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reconstruct OKLab (a, b) from relative chroma, hue, and lightness."""
+    C = C_rel * _lookup_gamut_max(L, h, gamut_lut)
+    return (C * np.cos(h)).astype(np.float32), (C * np.sin(h)).astype(np.float32)
 
 
 def chroma_offset_ab(
