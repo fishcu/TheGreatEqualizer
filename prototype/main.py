@@ -252,6 +252,23 @@ class HistogramPlot(QMainWindow):
         self.setCentralWidget(self._canvas)
         self._bins = np.linspace(0.0, 1.0, NUM_BINS)
 
+    @staticmethod
+    def _trim_bounds(
+        bins: np.ndarray, capped_hist: np.ndarray,
+    ) -> tuple[float, float] | None:
+        cdf = np.cumsum(capped_hist)
+        total = cdf[-1]
+        if total <= 0:
+            return None
+        cdf /= total
+        above_lo = cdf > _TRIM_EPS
+        below_hi = cdf < 1.0 - _TRIM_EPS
+        if not above_lo.any() or not below_hi.any():
+            return None
+        x_lo = bins[int(np.argmax(above_lo))]
+        x_hi = bins[len(cdf) - 1 - int(np.argmax(below_hi[::-1]))]
+        return x_lo, x_hi
+
     def update(
         self,
         raw_L: np.ndarray,
@@ -271,6 +288,18 @@ class HistogramPlot(QMainWindow):
             ax.set_xlim(0, 1)
             ax.set_ylabel("count")
             ax.set_title(title, fontsize=9)
+
+        vline_pairs = (
+            (self._axes[1, 0], capped_L, "steelblue"),
+            (self._axes[1, 1], capped_C, "darkorange"),
+        )
+        for ax, hist, vcolor in vline_pairs:
+            bounds = self._trim_bounds(self._bins, hist)
+            if bounds is not None:
+                for xv in bounds:
+                    ax.axvline(xv, color=vcolor, linewidth=0.7,
+                               linestyle="--", alpha=0.8)
+
         self._axes[1, 0].set_xlabel("OKLab L")
         self._axes[1, 1].set_xlabel("C / C_max")
         self._canvas.draw_idle()
