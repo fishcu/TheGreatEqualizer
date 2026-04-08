@@ -102,22 +102,26 @@ def _fit_single_channel(
     return _unpack(params)
 
 
-def _trim_cdf(cdf: np.ndarray) -> np.ndarray:
+_TRIM_EPS = 5e-3
+
+
+def _trim_cdf(cdf: np.ndarray, eps: float = _TRIM_EPS) -> np.ndarray:
     """Extract the rising portion of a [0, 1]-normalized CDF.
 
-    Removes leading bins stuck at 0 and trailing bins stuck at 1,
-    then rescales the remaining range to [0, 1].  This lets the
-    shape fitter ignore dead zones at the histogram edges.
+    Removes leading bins where CDF < *eps* and trailing bins where
+    CDF > 1 - *eps*, then rescales the remaining range to [0, 1].
+    This lets the shape fitter ignore sparse outlier pixels at the
+    histogram edges that would otherwise prevent effective trimming.
     """
-    above_zero = cdf > 0.0
-    if not above_zero.any():
+    above_lo = cdf > eps
+    if not above_lo.any():
         return cdf
-    first = int(np.argmax(above_zero))
+    first = int(np.argmax(above_lo))
 
-    below_one = cdf < 1.0
-    if not below_one.any():
+    below_hi = cdf < 1.0 - eps
+    if not below_hi.any():
         return cdf
-    last = len(cdf) - 1 - int(np.argmax(below_one[::-1]))
+    last = len(cdf) - 1 - int(np.argmax(below_hi[::-1]))
 
     trimmed = cdf[first : last + 1]
     lo, hi = trimmed[0], trimmed[-1]

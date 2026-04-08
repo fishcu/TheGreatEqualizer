@@ -29,7 +29,7 @@ from oklab import (
     relative_chroma,
     zone_weights_cdf,
 )
-from fit_params import fit_initial_params
+from fit_params import fit_initial_params, _TRIM_EPS
 import numpy as np
 import matplotlib
 import cv2
@@ -306,12 +306,12 @@ class CdfPlot(QMainWindow):
                 linewidth=0.9, alpha=0.85)
         ax.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
 
-        above_zero = cdf > 0.0
-        below_one = cdf < 1.0
-        if above_zero.any() and below_one.any():
-            x_lo = self._hist_bins[int(np.argmax(above_zero))]
+        above_lo = cdf > _TRIM_EPS
+        below_hi = cdf < 1.0 - _TRIM_EPS
+        if above_lo.any() and below_hi.any():
+            x_lo = self._hist_bins[int(np.argmax(above_lo))]
             x_hi = self._hist_bins[
-                len(cdf) - 1 - int(np.argmax(below_one[::-1]))
+                len(cdf) - 1 - int(np.argmax(below_hi[::-1]))
             ]
             for xv in (x_lo, x_hi):
                 ax.axvline(xv, color=vline_color, linewidth=0.7,

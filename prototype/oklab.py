@@ -165,7 +165,8 @@ def relative_chroma(
     C = np.sqrt(a * a + b_ok * b_ok)
     h = np.arctan2(b_ok, a) % (2.0 * np.pi)
     C_max = _lookup_gamut_max(L, h, gamut_lut)
-    C_rel = np.where(C_max > 1e-10, C / C_max, np.float32(0.0))
+    C_rel = np.where(C_max > 1e-10, C /
+                     np.maximum(C_max, 1e-10), np.float32(0.0))
     return np.clip(C_rel, 0.0, 1.0).astype(np.float32), h.astype(np.float32)
 
 
