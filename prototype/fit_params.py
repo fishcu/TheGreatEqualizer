@@ -7,55 +7,57 @@ dependency, directly portable to Kotlin / any other language.
 import numpy as np
 
 # Parameter names and their (min, max) bounds, mirroring the UI sliders.
-# t, s, and g are angles in degrees (0–90); 45° is the neutral identity.
+# t, s, and g are angles in radians; π/4 is the neutral identity.
+# Bounds chosen so the exponent range matches the original raw-exponent limits.
 # Black/white are excluded — they are independent post-CDF deltas, not fitted.
+_PI_4 = float(np.pi / 4)
 PARAM_NAMES = ("t", "s", "c", "g")
 PARAM_BOUNDS = {
-    "t": (5.0, 85.0),
-    "s": (5.0, 85.0),
+    "t": (0.01, 1.37),
+    "s": (0.20, 1.56),
     "c": (0.01, 0.99),
-    "g": (5.0, 85.0),
+    "g": (0.10, 1.25),
 }
-PARAM_DEFAULTS = {"t": 45.0, "s": 45.0, "c": 0.5, "g": 45.0}
+PARAM_DEFAULTS = {"t": _PI_4, "s": _PI_4, "c": 0.5, "g": _PI_4}
 
 
-def _toe_angle_to_exp(angle_deg: float) -> float:
-    """Toe angle (degrees) → power exponent via tan(θ).
+def _toe_angle_to_exp(angle_rad: float) -> float:
+    """Toe angle (radians) → power exponent via tan(θ).
 
     Higher angle → higher exponent → more shadow compression.
     """
-    return float(np.tan(np.radians(angle_deg)))
+    return float(np.tan(angle_rad))
 
 
-def _shoulder_angle_to_exp(angle_deg: float) -> float:
-    """Shoulder angle (degrees) → power exponent via cot(θ) = 1/tan(θ).
+def _shoulder_angle_to_exp(angle_rad: float) -> float:
+    """Shoulder angle (radians) → power exponent via cot(θ) = 1/tan(θ).
 
     Higher angle → lower exponent → brighter / more open highlights.
     """
-    return 1.0 / float(np.tan(np.radians(angle_deg)))
+    return 1.0 / float(np.tan(angle_rad))
 
 
 def _exp_to_toe_angle(t_exp: float) -> float:
-    """Power exponent → toe angle (degrees) via atan."""
-    return float(np.degrees(np.arctan(t_exp)))
+    """Power exponent → toe angle (radians) via atan."""
+    return float(np.arctan(t_exp))
 
 
 def _exp_to_shoulder_angle(s_exp: float) -> float:
-    """Power exponent → shoulder angle (degrees) via atan(1/exp)."""
-    return float(np.degrees(np.arctan(1.0 / s_exp)))
+    """Power exponent → shoulder angle (radians) via atan(1/exp)."""
+    return float(np.arctan(1.0 / s_exp))
 
 
-def _gamma_angle_to_exp(angle_deg: float) -> float:
-    """Gamma angle (degrees) → power exponent via tan(θ).
+def _gamma_angle_to_exp(angle_rad: float) -> float:
+    """Gamma angle (radians) → power exponent via tan(θ).
 
     Higher angle → higher exponent → more gamma contrast.
     """
-    return float(np.tan(np.radians(angle_deg)))
+    return float(np.tan(angle_rad))
 
 
 def _exp_to_gamma_angle(g_exp: float) -> float:
-    """Power exponent → gamma angle (degrees) via atan."""
-    return float(np.degrees(np.arctan(g_exp)))
+    """Power exponent → gamma angle (radians) via atan."""
+    return float(np.arctan(g_exp))
 
 
 def compute_target_cdf(
@@ -67,8 +69,8 @@ def compute_target_cdf(
 ) -> np.ndarray:
     """Parametric target CDF — always maps [0, 1] → [0, 1].
 
-    *t*, *s*, and *g* are angles in degrees (0–90).  45° is the identity.
-    Internally converted to power exponents via tan (toe) / cot (shoulder, gamma).
+    *t*, *s*, and *g* are angles in radians; π/4 is the identity.
+    Internally converted to power exponents via tan (toe, gamma) / cot (shoulder).
     """
     t_exp = _toe_angle_to_exp(t)
     s_exp = _shoulder_angle_to_exp(s)

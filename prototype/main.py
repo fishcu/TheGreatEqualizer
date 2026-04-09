@@ -137,8 +137,8 @@ def compute_target_cdf(
 ) -> np.ndarray:
     """Evaluate the parametric target CDF at positions *x* (in [0, 1]).
 
-    *t*, *s*, and *g* are angles in degrees (0–90).  45° is the identity.
-    Internally converted to power exponents via tan (toe) / cot (shoulder, gamma).
+    *t*, *s*, and *g* are angles in radians; π/4 is the identity.
+    Internally converted to power exponents via tan (toe, gamma) / cot (shoulder).
 
     The curve h(x) is a piecewise power function joined at *c*,
     with continuity ensured by the alpha/beta weighting.  Always maps
@@ -374,7 +374,6 @@ class CdfPlot(QMainWindow):
             cdf /= total
         ax.plot(self._hist_bins, cdf, color=color,
                 linewidth=0.9, alpha=0.85)
-        ax.plot([0, 1], [0, 1], color="gray", linewidth=0.5, linestyle="--")
 
         above_lo = cdf > _TRIM_EPS
         below_hi = cdf < 1.0 - _TRIM_EPS
@@ -383,6 +382,8 @@ class CdfPlot(QMainWindow):
             x_hi = self._hist_bins[
                 len(cdf) - 1 - int(np.argmax(below_hi[::-1]))
             ]
+            ax.plot([x_lo, x_hi], [0, 1], color="gray",
+                    linewidth=0.5, linestyle="--")
             for xv in (x_lo, x_hi):
                 ax.axvline(xv, color=vline_color, linewidth=0.7,
                            linestyle="--", alpha=0.8)
@@ -391,6 +392,8 @@ class CdfPlot(QMainWindow):
                 fontsize=9,
             )
         else:
+            ax.plot([0, 1], [0, 1], color="gray",
+                    linewidth=0.5, linestyle="--")
             ax.set_title(f"Input CDF ({label})", fontsize=9)
 
         ax.set_xlim(0, 1)
@@ -590,10 +593,10 @@ class ControlsPanel(QWidget):
         layout.addWidget(self.fit_btn)
         self.fit_btn.clicked.connect(self.fit_L_requested.emit)
 
-        self.t = LabeledSlider("t", 5.0, 85.0, 45.0)
-        self.s = LabeledSlider("s", 5.0, 85.0, 45.0)
+        self.t = LabeledSlider("t", 0.01, 1.37, 0.7854)
+        self.s = LabeledSlider("s", 0.20, 1.56, 0.7854)
         self.c = LabeledSlider("c", 0.01, 0.99, 0.5)
-        self.g = LabeledSlider("g", 5.0, 85.0, 45.0)
+        self.g = LabeledSlider("g", 0.10, 1.25, 0.7854)
         self.black = LabeledSlider("black", -0.2, 1.0, 0.0)
         self.white = LabeledSlider("white", -1.0, 0.2, 0.0)
 
@@ -613,10 +616,10 @@ class ControlsPanel(QWidget):
         layout.addWidget(self.fit_btn_c)
         self.fit_btn_c.clicked.connect(self.fit_C_requested.emit)
 
-        self.tc = LabeledSlider("t", 5.0, 85.0, 45.0)
-        self.sc = LabeledSlider("s", 5.0, 85.0, 45.0)
+        self.tc = LabeledSlider("t", 0.01, 1.37, 0.7854)
+        self.sc = LabeledSlider("s", 0.20, 1.56, 0.7854)
         self.cc = LabeledSlider("c", 0.01, 0.99, 0.5)
-        self.gc = LabeledSlider("g", 5.0, 85.0, 45.0)
+        self.gc = LabeledSlider("g", 0.10, 1.25, 0.7854)
         self.black_c = LabeledSlider("black", -0.2, 1.0, 0.0)
         self.white_c = LabeledSlider("white", -1.0, 0.2, 0.0)
 
