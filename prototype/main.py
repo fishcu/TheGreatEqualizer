@@ -29,7 +29,13 @@ from oklab import (
     relative_chroma,
     zone_weights_cdf,
 )
-from fit_params import fit_initial_params, _TRIM_EPS
+from fit_params import (
+    fit_initial_params,
+    _TRIM_EPS,
+    _toe_angle_to_exp,
+    _shoulder_angle_to_exp,
+    _gamma_angle_to_exp,
+)
 import numpy as np
 import matplotlib
 import cv2
@@ -131,20 +137,25 @@ def compute_target_cdf(
 ) -> np.ndarray:
     """Evaluate the parametric target CDF at positions *x* (in [0, 1]).
 
+    *t*, *s*, and *g* are angles in degrees (0–90).  45° is the identity.
+    Internally converted to power exponents via tan (toe) / cot (shoulder, gamma).
+
     The curve h(x) is a piecewise power function joined at *c*,
-    shaped by *t* (shadow exponent) and *s* (highlight exponent), with
-    continuity ensured by the alpha/beta weighting.  Always maps
+    with continuity ensured by the alpha/beta weighting.  Always maps
     [0, 1] → [0, 1]; black/white deltas are applied separately.
     """
-    alpha = s * c / (s * c + t * (1.0 - c))
+    t_exp = _toe_angle_to_exp(t)
+    s_exp = _shoulder_angle_to_exp(s)
+    g_exp = _gamma_angle_to_exp(g)
+    alpha = s_exp * c / (s_exp * c + t_exp * (1.0 - c))
     beta = 1.0 - alpha
 
     h = np.where(
         x <= c,
-        alpha * np.power(x / c, t),
-        1.0 - beta * np.power((1.0 - x) / (1.0 - c), s),
+        alpha * np.power(x / c, t_exp),
+        1.0 - beta * np.power((1.0 - x) / (1.0 - c), s_exp),
     )
-    return np.clip(np.power(h, g), 0.0, 1.0)
+    return np.clip(np.power(h, g_exp), 0.0, 1.0)
 
 
 def apply_channel_cdf(
@@ -579,10 +590,10 @@ class ControlsPanel(QWidget):
         layout.addWidget(self.fit_btn)
         self.fit_btn.clicked.connect(self.fit_L_requested.emit)
 
-        self.t = LabeledSlider("t", 0.01, 5.0, 1.0)
-        self.s = LabeledSlider("s", 0.01, 5.0, 1.0)
+        self.t = LabeledSlider("t", 5.0, 85.0, 45.0)
+        self.s = LabeledSlider("s", 5.0, 85.0, 45.0)
         self.c = LabeledSlider("c", 0.01, 0.99, 0.5)
-        self.g = LabeledSlider("g", 0.1, 3.0, 1.0)
+        self.g = LabeledSlider("g", 5.0, 85.0, 45.0)
         self.black = LabeledSlider("black", -0.2, 1.0, 0.0)
         self.white = LabeledSlider("white", -1.0, 0.2, 0.0)
 
@@ -602,10 +613,10 @@ class ControlsPanel(QWidget):
         layout.addWidget(self.fit_btn_c)
         self.fit_btn_c.clicked.connect(self.fit_C_requested.emit)
 
-        self.tc = LabeledSlider("t", 0.01, 5.0, 1.0)
-        self.sc = LabeledSlider("s", 0.01, 5.0, 1.0)
+        self.tc = LabeledSlider("t", 5.0, 85.0, 45.0)
+        self.sc = LabeledSlider("s", 5.0, 85.0, 45.0)
         self.cc = LabeledSlider("c", 0.01, 0.99, 0.5)
-        self.gc = LabeledSlider("g", 0.1, 3.0, 1.0)
+        self.gc = LabeledSlider("g", 5.0, 85.0, 45.0)
         self.black_c = LabeledSlider("black", -0.2, 1.0, 0.0)
         self.white_c = LabeledSlider("white", -1.0, 0.2, 0.0)
 
