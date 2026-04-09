@@ -53,9 +53,15 @@ def oklab_to_linear_bgr(L: np.ndarray, a: np.ndarray, b_ok: np.ndarray) -> np.nd
     return np.ascontiguousarray(rgb[..., ::-1])
 
 
-_CDF_CENTERS = np.array([1.0 / 6.0, 1.0 / 2.0, 5.0 / 6.0], dtype=np.float32)
-_CDF_SIGMA = np.float32(0.2)
-_CDF_INV_2S2 = np.float32(-0.5 / (_CDF_SIGMA * _CDF_SIGMA))
+_ZONE_BOUNDARY_LO = np.float32(1.0 / 3.0)
+_ZONE_BOUNDARY_HI = np.float32(2.0 / 3.0)
+_ZONE_HALF_W = np.float32(1.0 / 4.0)
+
+
+def _smoothstep(t: np.ndarray) -> np.ndarray:
+    """Hermite smoothstep: 3t^2 - 2t^3, clamped to [0, 1]."""
+    t = np.clip(t, 0.0, 1.0)
+    return t * t * (np.float32(3.0) - np.float32(2.0) * t)
 
 
 def zone_weights_cdf(
@@ -63,20 +69,21 @@ def zone_weights_cdf(
     cdf_bins: np.ndarray,
     cdf_values: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Zone weights from fixed Gaussians in CDF space.
+    """Smoothstep partition-of-unity zone weights in CDF space.
 
     Maps each pixel's L through the output CDF to a uniform [0, 1] rank,
-    then applies three Gaussians centered at 1/6, 1/2, 5/6 with fixed
-    sigma.  Adapts automatically to any L distribution with zero tunable
-    parameters.
+    then partitions into three zones via two smoothstep transitions at
+    1/3 and 2/3.  Sums to exactly 1.0 everywhere by construction.
     """
     u = np.interp(np.clip(L, 0.0, 1.0), cdf_bins,
                   cdf_values).astype(np.float32)
-    w_s = np.exp(_CDF_INV_2S2 * (u - _CDF_CENTERS[0]) ** 2)
-    w_m = np.exp(_CDF_INV_2S2 * (u - _CDF_CENTERS[1]) ** 2)
-    w_h = np.exp(_CDF_INV_2S2 * (u - _CDF_CENTERS[2]) ** 2)
-    w_sum = w_s + w_m + w_h + np.float32(1e-12)
-    return w_s / w_sum, w_m / w_sum, w_h / w_sum
+    inv_width = np.float32(1.0 / (2.0 * _ZONE_HALF_W))
+    t1 = _smoothstep((u - (_ZONE_BOUNDARY_LO - _ZONE_HALF_W)) * inv_width)
+    t2 = _smoothstep((u - (_ZONE_BOUNDARY_HI - _ZONE_HALF_W)) * inv_width)
+    w_s = np.float32(1.0) - t1
+    w_h = t2
+    w_m = t1 - t2
+    return w_s, w_m, w_h
 
 
 def build_gamut_lut(n_L: int = 256, n_h: int = 360) -> np.ndarray:
