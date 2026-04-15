@@ -1,47 +1,38 @@
-# Android & Gradle
+# Android build artifacts
 .gradle/
 **/build/
-!gradle/wrapper/gradle-wrapper.jar
+android/local.properties
 
-# Local configuration
-local.properties
-
-# Android Studio / IntelliJ
+# IDE
 .idea/
 *.iml
 
-# VS Code
-.vscode/
-
-# Native/NDK
-.cxx/
-.externalNativeBuild/
-captures/
+# OS
+.DS_Store
+Thumbs.db
 
 # Distribution artifacts
 *.apk
 *.aab
-*.ap_
-
-# Logs and misc
-*.log
-.DS_Store
-Thumbs.db
 
 # Signing materials
-*.jks
 *.keystore
-keystore.properties
-signing.properties
+*.jks
+android/keystore.properties
 
-# Google/Firebase
-google-services.json
-GoogleService-Info.plist
-
-# Python
-__pycache__/
+# Python cache
+prototype/__pycache__/
+*.pyc
 
 # Prototype test images
 prototype/*.jpg
 prototype/*.jpeg
 prototype/*.png
+
+# Benchmark outputs (tracked separately)
+benchmarks/runs/
+
+# Keep benchmark scripts
+!benchmarks/*.sh
+!benchmarks/*.py
+!benchmarks/README.md

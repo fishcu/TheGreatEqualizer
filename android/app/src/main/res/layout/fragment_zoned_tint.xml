@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.thegreatequalizer.app.TintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1a1a1a">
+
+    <!-- Pair 0: Shadows -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_tint_shadows"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp" />
+
+    <com.thegreatequalizer.app.ColorWheelView
+        android:id="@+id/wheel_shadows"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <!-- Pair 1: Midtones -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_tint_midtones"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp" />
+
+    <com.thegreatequalizer.app.ColorWheelView
+        android:id="@+id/wheel_midtones"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <!-- Pair 2: Highlights -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_tint_highlights"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp" />
+
+    <com.thegreatequalizer.app.ColorWheelView
+        android:id="@+id/wheel_highlights"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+</com.thegreatequalizer.app.TintLayout>

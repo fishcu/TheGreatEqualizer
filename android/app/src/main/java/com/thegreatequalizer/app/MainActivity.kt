@@ -1,0 +1,766 @@
+package com.thegreatequalizer.app
+
+import android.content.ContentValues
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
+import android.graphics.RectF
+import android.content.res.Configuration
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.os.VibrationEffect
+import android.os.Vibrator
+
+import android.provider.MediaStore
+import android.util.Log
+import android.view.MotionEvent
+import android.view.View
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.Toast
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
+import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.floatingactionbutton.FloatingActionButton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.random.Random
+
+class MainActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "TheGreatEqualizer"
+        private const val AB_DELAY_MS = 100L
+        private const val HIRES_ZOOM_THRESHOLD = 1.5f
+        private const val HIRES_DEBOUNCE_MS = 150L
+        private const val HIRES_PADDING = 0.2f  // 20% extra on each side
+    }
+
+    private lateinit var imageView: ZoomableImageView
+    private lateinit var addPhotoOverlay: View
+    private lateinit var fabLoad: FloatingActionButton
+    private lateinit var fabExport: FloatingActionButton
+    private lateinit var fabShare: FloatingActionButton
+    private lateinit var fabRandomize: FloatingActionButton
+    private lateinit var controlsPanel: View
+    private lateinit var bottomNav: BottomNavigationView
+    private var currentNavItemId: Int = R.id.nav_light
+    private var originalBitmap: Bitmap? = null
+    private var processedBitmap: Bitmap? = null
+    private var gamutLut: FloatArray? = null
+    private var gpuPipeline: GpuPipeline? = null
+    private val gpuDispatcher = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "gpu-pipeline").also { it.isDaemon = true }
+    }.asCoroutineDispatcher()
+    // Staged pipeline state
+    var pipelineState: PipelineState = PipelineState()
+        private set
+    var pipelineParams: PipelineParams = PipelineParams()
+        private set
+    private var isRendering = false
+    private var pendingParams: PipelineParams? = null
+    private var renderGeneration = 0L
+    private var isShowingOriginal = false
+    private var multiTouchActive = false
+    private var abDelayJob: Job? = null
+
+    private lateinit var shakeDetector: ShakeDetector
+
+    // Hi-res crop overlay state
+    private var hiResCropJob: Job? = null
+    private var hiResCropGeneration = 0L
+    private var currentHiResBitmap: Bitmap? = null
+    private var currentHiResCropRect: RectF? = null
+
+    private val pickImage = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
+        uri?.let { loadImageFromUri(it) }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        bindViews()
+
+        shakeDetector = ShakeDetector(this) { runOnUiThread { randomizeParams() } }
+
+        // Set initial fragment
+        if (savedInstanceState == null) {
+            supportFragmentManager.beginTransaction()
+                .replace(R.id.fragmentContainer, LightFragment())
+                .commit()
+        }
+
+        // Pre-build gamut LUT and init GPU
+        lifecycleScope.launch {
+            gamutLut = withContext(Dispatchers.Default) {
+                OkLab.buildGamutLut()
+            }
+            Log.i(TAG, "Gamut LUT built")
+
+            initGpuPipeline()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        shakeDetector.start()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        shakeDetector.stop()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        setContentView(R.layout.activity_main)
+        bindViews()
+
+        // Restore image display
+        if (processedBitmap != null) {
+            showImageLoaded()
+            imageView.setImageBitmap(processedBitmap)
+        }
+
+        // Restore bottom nav selection — triggers fragment re-attach via listener
+        bottomNav.selectedItemId = currentNavItemId
+    }
+
+    private fun bindViews() {
+        imageView = findViewById(R.id.imageView)
+        addPhotoOverlay = findViewById(R.id.addPhotoOverlay)
+        fabLoad = findViewById(R.id.fabLoad)
+        fabExport = findViewById(R.id.fabExport)
+        fabShare = findViewById(R.id.fabShare)
+        fabRandomize = findViewById(R.id.fabRandomize)
+        controlsPanel = findViewById(R.id.controlsPanel)
+        bottomNav = findViewById(R.id.bottomNav)
+
+        addPhotoOverlay.setOnClickListener { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+
+        // FAB actions
+        fabLoad.setOnClickListener { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+        fabExport.setOnClickListener { exportImage() }
+        fabShare.setOnClickListener { shareImage() }
+        fabRandomize.setOnClickListener { randomizeParams() }
+
+        // Bottom navigation to swap fragments
+        bottomNav.setOnItemSelectedListener { item ->
+            currentNavItemId = item.itemId
+            val fragment = when (item.itemId) {
+                R.id.nav_light -> LightFragment()
+                R.id.nav_color -> ColorFragment()
+                R.id.nav_zoned_tint -> ZonedTintFragment()
+                else -> return@setOnItemSelectedListener false
+            }
+            supportFragmentManager.beginTransaction()
+                .replace(R.id.fragmentContainer, fragment)
+                .commit()
+            true
+        }
+
+        // A/B compare: instant show on single-finger press, restore on release.
+        // Touch handling is in dispatchTouchEvent() below.
+
+        // Viewport change listener for hi-res crop overlay
+        imageView.onViewportChanged = { onViewportChanged() }
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (isTouchOnImageView(event)) {
+                    val orig = originalBitmap
+                    val proc = processedBitmap
+                    if (orig != null && proc != null) {
+                        multiTouchActive = false
+                        // Delay A/B by 200ms to avoid flicker when second finger arrives
+                        abDelayJob?.cancel()
+                        abDelayJob = lifecycleScope.launch {
+                            delay(AB_DELAY_MS)
+                            if (!multiTouchActive) {
+                                isShowingOriginal = true
+                                imageView.clearOverlay()
+                                updateImageBitmap(orig)
+                            }
+                        }
+                    }
+                }
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // Second finger arrived — cancel pending A/B, restore if already showing
+                abDelayJob?.cancel()
+                abDelayJob = null
+                multiTouchActive = true
+                if (isShowingOriginal) {
+                    isShowingOriginal = false
+                    val bmp = processedBitmap
+                    if (bmp != null) updateImageBitmap(bmp)
+                    val hiResBmp = currentHiResBitmap
+                    val hiResRect = currentHiResCropRect
+                    if (hiResBmp != null && hiResRect != null) {
+                        imageView.setOverlay(hiResBmp, hiResRect)
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                abDelayJob?.cancel()
+                abDelayJob = null
+                if (isShowingOriginal) {
+                    isShowingOriginal = false
+                    val bmp = processedBitmap
+                    if (bmp != null) updateImageBitmap(bmp)
+                    val hiResBmp = currentHiResBitmap
+                    val hiResRect = currentHiResCropRect
+                    if (hiResBmp != null && hiResRect != null) {
+                        imageView.setOverlay(hiResBmp, hiResRect)
+                    }
+                }
+                multiTouchActive = false
+            }
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    private fun isTouchOnImageView(event: MotionEvent): Boolean {
+        val loc = IntArray(2)
+        imageView.getLocationOnScreen(loc)
+        val x = event.rawX
+        val y = event.rawY
+        return x >= loc[0] && x <= loc[0] + imageView.width &&
+               y >= loc[1] && y <= loc[1] + imageView.height
+    }
+
+    private fun showImageLoaded() {
+        addPhotoOverlay.visibility = View.GONE
+    }
+
+    private fun loadImageFromUri(uri: Uri) {
+        try {
+            val bitmap = loadBitmapFromUri(uri)
+
+            if (bitmap != null) {
+                invalidateHiResCrop()
+                originalBitmap = bitmap
+                processedBitmap = null
+                imageView.setImageBitmap(bitmap)
+                showImageLoaded()
+                processImage()
+            } else {
+                Toast.makeText(this, "Failed to decode image", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "Error loading image: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun loadBitmapFromUri(uri: Uri): Bitmap? {
+        return ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { decoder, _, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    }
+
+    private fun processImage() {
+        val src = originalBitmap ?: return
+        val lut = gamutLut
+        val gpu = gpuPipeline
+
+        if (gpu != null && lut != null) {
+            // Staged GPU pipeline
+            lifecycleScope.launch {
+                val startMs = System.currentTimeMillis()
+                try {
+                    // Pass 1: run once for this image
+                    val state = withContext(gpuDispatcher) {
+                        ImagePipeline.processPass1Only(src, lut, gpu)
+                    }
+                    pipelineState = state
+
+                    // Fit both channels to get initial params
+                    var params = PipelineParams()
+                    params = withContext(Dispatchers.Default) {
+                        ImagePipeline.fitToInput(state, params, "light")
+                    }
+                    params = withContext(Dispatchers.Default) {
+                        ImagePipeline.fitToInput(state, params, "color")
+                    }
+                    pipelineParams = params
+
+                    // Pass 2: render with fitted params
+                    val outBitmap = withContext(gpuDispatcher) {
+                        ImagePipeline.processFromParams(state, params, lut, gpu)
+                    }
+
+                    val elapsed = System.currentTimeMillis() - startMs
+                    Log.i(TAG, "Staged GPU processing took ${elapsed}ms")
+
+                    processedBitmap = outBitmap
+                    pipelineState.processedBitmap = outBitmap
+                    imageView.setImageBitmap(outBitmap)
+
+                    // Update fragment sliders + tick marks for the new fitted values
+                    notifyFragmentUpdate()
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "Processing error", e)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Processing error: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        } else {
+            // Fallback: old CPU pipeline
+            lifecycleScope.launch {
+                val startMs = System.currentTimeMillis()
+                try {
+                    val result = withContext(Dispatchers.Default) {
+                        ImagePipeline.process(src, lut)
+                    }
+                    val elapsed = System.currentTimeMillis() - startMs
+                    Log.i(TAG, "CPU processing took ${elapsed}ms")
+
+                    processedBitmap = result.outputBitmap
+                    imageView.setImageBitmap(result.outputBitmap)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Processing error", e)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Processing error: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    private fun notifyFragmentUpdate() {
+        val currentFragment = supportFragmentManager.findFragmentById(R.id.fragmentContainer)
+        when (currentFragment) {
+            is LightFragment -> currentFragment.updateFromParams()
+            is ColorFragment -> currentFragment.updateFromParams()
+            is ZonedTintFragment -> currentFragment.updateFromParams()
+        }
+    }
+
+    private fun randomizeParams() {
+        if (!pipelineState.isImageLoaded()) return
+        val rng = java.util.Random()
+        val defaults = PipelineParams()
+        val pi = Math.PI.toFloat()
+        val twoPi = (2.0 * Math.PI).toFloat()
+
+        fun gaussian(center: Float, sd: Float, min: Float, max: Float): Float =
+            (center + rng.nextGaussian().toFloat() * sd).coerceIn(min, max)
+
+        fun angleParam(default: Float): Float =
+            gaussian(default, 0.15f * (pi / 2), 0f, pi / 2)
+
+        val newParams = defaults.copy(
+            // Light tab — keep smoothing at default
+            lightStrength = defaults.lightStrength,
+            lightShadows = angleParam(defaults.lightShadows),
+            lightHighlights = angleParam(defaults.lightHighlights),
+            lightMidtoneBalance = gaussian(defaults.lightMidtoneBalance, 0.15f, 0f, 1f),
+            lightMidtoneContrast = angleParam(defaults.lightMidtoneContrast),
+            lightBlacks = gaussian(defaults.lightBlacks, 0.15f, -1f, 1f),
+            lightWhites = gaussian(defaults.lightWhites, 0.15f, -1f, 1f),
+
+            // Color tab — keep smoothing at default
+            colorStrength = defaults.colorStrength,
+            colorMutedColors = angleParam(defaults.colorMutedColors),
+            colorVividColors = angleParam(defaults.colorVividColors),
+            colorSaturationBalance = gaussian(defaults.colorSaturationBalance, 0.15f, 0f, 1f),
+            colorVibrancy = angleParam(defaults.colorVibrancy),
+            colorBlacks = gaussian(defaults.colorBlacks, 0.15f, -1f, 1f),
+            colorWhites = gaussian(defaults.colorWhites, 0.15f, -1f, 1f),
+
+            // Zoned Tint — uniform angle, subtle strength
+            shadowTintAngle = Random.nextFloat() * twoPi,
+            shadowTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
+            midtoneTintAngle = Random.nextFloat() * twoPi,
+            midtoneTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
+            highlightTintAngle = Random.nextFloat() * twoPi,
+            highlightTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f)
+        )
+
+        // Haptic feedback
+        @Suppress("DEPRECATION")
+        val vibrator = getSystemService(VIBRATOR_SERVICE) as? Vibrator
+        if (vibrator?.hasVibrator() == true) {
+            vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+        }
+
+        onParamsChanged(newParams)
+        notifyFragmentUpdate()
+    }
+
+    /**
+     * Called by fragments when slider values change.
+     * Uses 'render latest' pattern: renders as fast as the GPU allows,
+     * always converging to the most recent params.
+     */
+    fun onParamsChanged(params: PipelineParams) {
+        pipelineParams = params
+        val lut = gamutLut ?: return
+        val gpu = gpuPipeline ?: return
+        val state = pipelineState
+        if (!state.isImageLoaded()) return
+
+        // Full invalidate: processing params changed, cached overlay is stale
+        invalidateHiResCrop()
+
+        pendingParams = params
+        renderGeneration++
+
+        if (!isRendering) {
+            startRender(state, lut, gpu)
+        }
+    }
+
+    private fun startRender(state: PipelineState, lut: FloatArray, gpu: GpuPipeline) {
+        val paramsToRender = pendingParams ?: return
+        val genAtStart = renderGeneration
+        isRendering = true
+
+        lifecycleScope.launch {
+            try {
+                val outBitmap = withContext(gpuDispatcher) {
+                    ImagePipeline.processFromParams(state, paramsToRender, lut, gpu)
+                }
+                processedBitmap = outBitmap
+                state.processedBitmap = outBitmap
+                if (!isShowingOriginal) {
+                    updateImageBitmap(outBitmap)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Render error", e)
+            } finally {
+                isRendering = false
+                if (renderGeneration != genAtStart) {
+                    startRender(state, lut, gpu)
+                } else {
+                    // Low-res is up to date — kick off hi-res crop if zoomed
+                    maybeStartHiResCrop()
+                }
+            }
+        }
+    }
+
+    private fun updateImageBitmap(bitmap: Bitmap) {
+        val savedMatrix = imageView.getTransformMatrix()
+        imageView.setImageBitmap(bitmap)
+        imageView.setTransformMatrix(savedMatrix)
+    }
+
+    // ---------------------------------------------------------------
+    // Hi-res crop overlay (second rendering track)
+    // ---------------------------------------------------------------
+
+    private fun onViewportChanged() {
+        // Cancel in-progress render job; keep existing overlay visible until replaced
+        cancelHiResCropJob()
+
+        // Check if zoomed enough to warrant hi-res
+        if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) return
+        if (!pipelineState.isImageLoaded()) return
+        val orig = originalBitmap ?: return
+        if (maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) return
+
+        // Debounce: wait for gesture to settle
+        val gen = ++hiResCropGeneration
+        hiResCropJob = lifecycleScope.launch {
+            delay(HIRES_DEBOUNCE_MS)
+            if (gen == hiResCropGeneration) {
+                startHiResCrop()
+            }
+        }
+    }
+
+    private fun maybeStartHiResCrop() {
+        if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) return
+        if (!pipelineState.isImageLoaded()) return
+        val orig = originalBitmap ?: return
+        if (maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) return
+
+        cancelHiResCropJob()
+        val gen = ++hiResCropGeneration
+        hiResCropJob = lifecycleScope.launch {
+            if (gen == hiResCropGeneration) {
+                startHiResCrop()
+            }
+        }
+    }
+
+    /** Cancel only the in-progress hi-res render job; keep cached overlay visible. */
+    private fun cancelHiResCropJob() {
+        hiResCropJob?.cancel()
+        hiResCropJob = null
+    }
+
+    /** Cancel job AND clear cached overlay — for slider changes / new image loads. */
+    private fun invalidateHiResCrop() {
+        hiResCropJob?.cancel()
+        hiResCropJob = null
+        currentHiResBitmap = null
+        currentHiResCropRect = null
+        imageView.clearOverlay()
+    }
+
+    private fun startHiResCrop() {
+        val orig = originalBitmap ?: return
+        val state = pipelineState
+        val params = pipelineParams
+        val lut = gamutLut ?: return
+        val gpu = gpuPipeline ?: return
+        if (!state.isImageLoaded()) return
+
+        // Get visible rect in the 1024px image coordinates
+        val visibleRect = imageView.getVisibleImageRect() ?: return
+        val previewBm = state.originalBitmap ?: return
+
+        // Scale visible rect from preview coordinates to original coordinates
+        val scaleX = orig.width.toFloat() / previewBm.width.toFloat()
+        val scaleY = orig.height.toFloat() / previewBm.height.toFloat()
+
+        val origLeft = visibleRect.left * scaleX
+        val origTop = visibleRect.top * scaleY
+        val origRight = visibleRect.right * scaleX
+        val origBottom = visibleRect.bottom * scaleY
+
+        // Add padding (20% on each side)
+        val padW = (origRight - origLeft) * HIRES_PADDING
+        val padH = (origBottom - origTop) * HIRES_PADDING
+
+        // Clamp to image bounds
+        val cropX = (origLeft - padW).toInt().coerceIn(0, orig.width - 1)
+        val cropY = (origTop - padH).toInt().coerceIn(0, orig.height - 1)
+        val cropRight = (origRight + padW).toInt().coerceIn(cropX + 1, orig.width)
+        val cropBottom = (origBottom + padH).toInt().coerceIn(cropY + 1, orig.height)
+        val cropW = cropRight - cropX
+        val cropH = cropBottom - cropY
+
+        if (cropW <= 0 || cropH <= 0) return
+
+        // Remember which crop region this render covers (in preview image coordinates)
+        val cropRectInPreview = RectF(
+            cropX / scaleX, cropY / scaleY,
+            cropRight / scaleX, cropBottom / scaleY
+        )
+
+        val gen = hiResCropGeneration
+
+        hiResCropJob = lifecycleScope.launch {
+            try {
+                val cropBitmap = withContext(gpuDispatcher) {
+                    val result = ImagePipeline.processHiResCrop(
+                        orig, cropX, cropY, cropW, cropH,
+                        state, params, lut, gpu
+                    )
+                    // Restore preview SSBOs so low-res renders continue to work
+                    val previewPixels = IntArray(state.pixelCount)
+                    previewBm.getPixels(
+                        previewPixels, 0, state.width,
+                        0, 0, state.width, state.height
+                    )
+                    gpu.processPass1(previewPixels, state.pixelCount)
+                    result
+                }
+
+                // Only apply if still the current generation (no cancel/new render happened)
+                if (gen == hiResCropGeneration && !isShowingOriginal) {
+                    currentHiResBitmap = cropBitmap
+                    currentHiResCropRect = cropRectInPreview
+                    imageView.setOverlay(cropBitmap, cropRectInPreview)
+                    Log.i(TAG, "[HiResCrop] Overlay applied: ${cropW}x${cropH}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Hi-res crop render error", e)
+            }
+        }
+    }
+
+    /**
+     * Process the full-resolution image (tiled GPU export) then run [action].
+     * Shows a progress dialog during processing.
+     * Falls back to preview-resolution processedBitmap if GPU is unavailable
+     * or the image wasn't downscaled.
+     */
+    private fun processAndExport(action: suspend (Bitmap) -> Unit) {
+        val orig = originalBitmap
+        val state = pipelineState
+        val params = pipelineParams
+        val lut = gamutLut
+        val gpu = gpuPipeline
+
+        if (orig == null || !state.isImageLoaded()) {
+            Toast.makeText(this, "No processed image to export", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // If no GPU or image fits in preview, use existing processedBitmap
+        if (gpu == null || lut == null ||
+            maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+            val bitmap = processedBitmap ?: return
+            lifecycleScope.launch { action(bitmap) }
+            return
+        }
+
+        // Show progress dialog
+        val dp = resources.displayMetrics.density
+        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            isIndeterminate = false
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((24 * dp).toInt(), (16 * dp).toInt(), (24 * dp).toInt(), (24 * dp).toInt())
+            addView(progressBar)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Processing\u2026")
+            .setView(container)
+            .setCancelable(false)
+            .create()
+        dialog.show()
+
+        lifecycleScope.launch {
+            try {
+                // Phase 1: Tiled GPU render (0–85%)
+                val fullResBitmap = withContext(gpuDispatcher) {
+                    ImagePipeline.processFullResolution(
+                        orig, state, params, lut, gpu,
+                        onProgress = { fraction ->
+                            runOnUiThread {
+                                progressBar.progress = (fraction * 85).toInt()
+                            }
+                        }
+                    )
+                }
+
+                // Phase 2: Restore preview SSBOs (85–90%)
+                dialog.setTitle("Finalizing\u2026")
+                progressBar.progress = 85
+                withContext(gpuDispatcher) {
+                    val previewBitmap = state.originalBitmap!!
+                    val previewPixels = IntArray(state.pixelCount)
+                    previewBitmap.getPixels(
+                        previewPixels, 0, state.width,
+                        0, 0, state.width, state.height
+                    )
+                    gpu.processPass1(previewPixels, state.pixelCount)
+                }
+                progressBar.progress = 90
+
+                // Phase 3: Export/save (90–100%)
+                dialog.setTitle("Saving\u2026")
+                action(fullResBitmap)
+                progressBar.progress = 100
+
+                dialog.dismiss()
+            } catch (e: Exception) {
+                dialog.dismiss()
+                Log.e(TAG, "Full-res export failed", e)
+                Toast.makeText(
+                    this@MainActivity,
+                    "Export failed: ${e.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun exportImage() {
+        processAndExport { bitmap ->
+            try {
+                val filename = "TGE_${System.currentTimeMillis()}.jpg"
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/TheGreatEqualizer")
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                }
+
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    withContext(Dispatchers.IO) {
+                        contentResolver.openOutputStream(uri)?.use { stream ->
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)
+                        }
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        contentValues.clear()
+                        contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                        contentResolver.update(uri, contentValues, null, null)
+                    }
+
+                    Toast.makeText(this@MainActivity, "Saved to gallery", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "Failed to save", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun shareImage() {
+        processAndExport { bitmap ->
+            val shareDir = File(cacheDir, "shared").also { it.mkdirs() }
+            val file = File(shareDir, "share_temp.jpg")
+            withContext(Dispatchers.IO) {
+                FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+            }
+            val uri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/jpeg"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "Share image"))
+        }
+    }
+
+    private fun initGpuPipeline() {
+        val lut = gamutLut ?: return
+        if (gpuPipeline != null) return
+
+        lifecycleScope.launch {
+            try {
+                val pipeline = GpuPipeline()
+                withContext(gpuDispatcher) {
+                    pipeline.init(this@MainActivity, lut)
+                }
+                gpuPipeline = pipeline
+                Log.i(TAG, "GPU compute pipeline initialized (GLES 3.1)")
+            } catch (e: Exception) {
+                Log.e(TAG, "GPU init failed, falling back to CPU", e)
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        gpuPipeline?.release()
+        gpuPipeline = null
+        gpuDispatcher.close()
+    }
+}

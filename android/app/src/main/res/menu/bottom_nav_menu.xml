@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item
+        android:id="@+id/nav_light"
+        android:icon="@drawable/ic_baseline_brightness_6_24"
+        android:title="@string/nav_light" />
+
+    <item
+        android:id="@+id/nav_color"
+        android:icon="@drawable/ic_baseline_palette_24"
+        android:title="@string/nav_color" />
+
+    <item
+        android:id="@+id/nav_zoned_tint"
+        android:icon="@drawable/ic_baseline_tune_24"
+        android:title="@string/nav_zoned_tint" />
+
+</menu>

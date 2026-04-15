@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1a1a1a"
+    android:orientation="horizontal">
+
+    <!-- Image area with overlay FABs and placeholder -->
+    <FrameLayout
+        android:id="@+id/imageArea"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1">
+
+        <com.thegreatequalizer.app.ZoomableImageView
+            android:id="@+id/imageView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/image_description" />
+
+        <!-- Large tap-target overlay shown when no image loaded -->
+        <FrameLayout
+            android:id="@+id/addPhotoOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_margin="16dp"
+            android:background="@drawable/bg_add_photo_overlay"
+            android:clickable="true"
+            android:focusable="true"
+            android:foreground="?attr/selectableItemBackground"
+            android:contentDescription="@string/add_photo">
+
+            <ImageView
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:layout_gravity="center"
+                android:src="@drawable/ic_add_photo_48"
+                android:scaleType="fitCenter"
+                android:importantForAccessibility="no" />
+
+        </FrameLayout>
+
+        <!-- Overlay FABs top-right -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
+            android:orientation="vertical">
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabLoad"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:contentDescription="@string/action_load"
+                app:backgroundTint="#CC424242"
+                app:fabCustomSize="40dp"
+                app:srcCompat="@drawable/ic_baseline_photo_library_24"
+                app:tint="@android:color/white" />
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabExport"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:contentDescription="@string/action_export"
+                app:backgroundTint="#CC424242"
+                app:fabCustomSize="40dp"
+                app:srcCompat="@drawable/ic_baseline_save_24"
+                app:tint="@android:color/white" />
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabShare"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="8dp"
+                android:contentDescription="@string/action_share"
+                app:backgroundTint="#CC424242"
+                app:fabCustomSize="40dp"
+                app:srcCompat="@drawable/ic_baseline_share_24"
+                app:tint="@android:color/white" />
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabRandomize"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/action_randomize"
+                app:backgroundTint="#CC424242"
+                app:fabCustomSize="40dp"
+                app:srcCompat="@drawable/ic_baseline_casino_24"
+                app:tint="@android:color/white" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- Controls panel: fragment + bottom nav (hidden until image loaded) -->
+    <LinearLayout
+        android:id="@+id/controlsPanel"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:visibility="visible">
+
+        <FrameLayout
+            android:id="@+id/fragmentContainer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <com.google.android.material.bottomnavigation.BottomNavigationView
+            android:id="@+id/bottomNav"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#1a1a1a"
+            app:itemIconTint="@color/bottom_nav_colors"
+            app:itemTextColor="@color/bottom_nav_colors"
+            app:menu="@menu/bottom_nav_menu" />
+
+    </LinearLayout>
+
+</LinearLayout>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">The Great Equalizer</string>
+    <string name="action_load">Load Image</string>
+    <string name="action_export">Export</string>
+    <string name="nav_light">Light</string>
+    <string name="nav_color">Color</string>
+    <string name="nav_zoned_tint">Zoned Tint</string>
+    <string name="image_description">Processed image</string>
+    <string name="add_photo">Add photo</string>
+    <string name="action_share">Share</string>
+    <string name="action_randomize">Randomize</string>
+    <string name="fit_to_input">Fit to Input</string>
+    <string name="label_smoothing">Smoothing</string>
+    <string name="label_shadows">Shadows</string>
+    <string name="label_highlights">Highlights</string>
+    <string name="label_midtone_balance">Midtone Balance</string>
+    <string name="label_midtone_contrast">Midtones</string>
+    <string name="label_blacks">Lift</string>
+    <string name="label_whites">Gain</string>
+    <string name="label_muted_colors">Muted Colors</string>
+    <string name="label_vivid_colors">Vivid Colors</string>
+    <string name="label_saturation_balance">Saturation Balance</string>
+    <string name="label_vibrancy">Vibrancy</string>
+    <string name="label_tint_shadows">Shadows</string>
+    <string name="label_tint_midtones">Midtones</string>
+    <string name="label_tint_highlights">Highlights</string>
+</resources>
