@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/imageArea"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <com.thegreatequalizer.app.ZoomableImageView
+        android:id="@+id/imageView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/image_description" />
+
+    <FrameLayout
+        android:id="@+id/addPhotoOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_margin="16dp"
+        android:background="@drawable/bg_add_photo_overlay"
+        android:clickable="true"
+        android:contentDescription="@string/add_photo"
+        android:focusable="true"
+        android:foreground="?attr/selectableItemBackground">
+
+        <ImageView
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:layout_gravity="center"
+            android:importantForAccessibility="no"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_add_photo_48" />
+
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="12dp"
+        android:orientation="vertical">
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabLoad"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:contentDescription="@string/action_load"
+            app:backgroundTint="#CC424242"
+            app:fabCustomSize="40dp"
+            app:srcCompat="@drawable/ic_baseline_photo_library_24"
+            app:tint="@android:color/white" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabExport"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:contentDescription="@string/action_export"
+            app:backgroundTint="#CC424242"
+            app:fabCustomSize="40dp"
+            app:srcCompat="@drawable/ic_baseline_save_24"
+            app:tint="@android:color/white" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabShare"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:contentDescription="@string/action_share"
+            app:backgroundTint="#CC424242"
+            app:fabCustomSize="40dp"
+            app:srcCompat="@drawable/ic_baseline_share_24"
+            app:tint="@android:color/white" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabRandomize"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/action_randomize"
+            app:backgroundTint="#CC424242"
+            app:fabCustomSize="40dp"
+            app:srcCompat="@drawable/ic_baseline_casino_24"
+            app:tint="@android:color/white" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/editHistoryControls"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="12dp"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabUndo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="6dp"
+            android:contentDescription="@string/action_undo"
+            app:backgroundTint="#B3424242"
+            app:fabCustomSize="48dp"
+            app:maxImageSize="28dp"
+            app:srcCompat="@drawable/ic_undo_24"
+            app:tint="@android:color/white" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/fabRedo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:contentDescription="@string/action_redo"
+            app:backgroundTint="#B3424242"
+            app:fabCustomSize="48dp"
+            app:maxImageSize="28dp"
+            app:srcCompat="@drawable/ic_redo_24"
+            app:tint="@android:color/white" />
+
+    </LinearLayout>
+
+</FrameLayout>
