@@ -10,6 +10,8 @@
     <string name="add_photo">Add photo</string>
     <string name="action_share">Share</string>
     <string name="action_randomize">Randomize</string>
+    <string name="action_undo">Undo</string>
+    <string name="action_redo">Redo</string>
     <string name="fit_to_input">Fit to Input</string>
     <string name="label_smoothing">Smoothing</string>
     <string name="label_shadows">Shadows</string>

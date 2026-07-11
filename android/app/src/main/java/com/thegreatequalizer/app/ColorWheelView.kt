@@ -30,6 +30,9 @@ class ColorWheelView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     var onTintChanged: ((angle: Float, strength: Float) -> Unit)? = null
+    var onInteractionStart: (() -> Unit)? = null
+    var onInteractionEnd: (() -> Unit)? = null
+    var onDoubleTapReset: (() -> Unit)? = null
 
     /** Max strength value corresponding to the edge of the disc. */
     var maxStrength: Float = 0.25f
@@ -78,6 +81,7 @@ class ColorWheelView @JvmOverloads constructor(
     private val doubleTapDetector = GestureDetector(context,
         object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
+                onDoubleTapReset?.invoke()
                 doubleTapConsumed = true
                 currentStrength = 0f
                 invalidate()
@@ -180,12 +184,16 @@ class ColorWheelView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.action == MotionEvent.ACTION_DOWN) {
+            onInteractionStart?.invoke()
+        }
         doubleTapDetector.onTouchEvent(event)
 
         // If a double-tap was consumed, suppress drag until finger lifts
         if (doubleTapConsumed) {
             if (event.action == MotionEvent.ACTION_UP || event.action == MotionEvent.ACTION_CANCEL) {
                 doubleTapConsumed = false
+                onInteractionEnd?.invoke()
             }
             return true
         }
@@ -213,6 +221,7 @@ class ColorWheelView @JvmOverloads constructor(
                 dragging = false
                 stickyAtCenter = false
                 parent?.requestDisallowInterceptTouchEvent(false)
+                onInteractionEnd?.invoke()
                 return true
             }
         }

@@ -94,6 +94,42 @@
 
         </LinearLayout>
 
+        <LinearLayout
+            android:id="@+id/editHistoryControls"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|center_horizontal"
+            android:layout_marginBottom="12dp"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabUndo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:contentDescription="@string/action_undo"
+                app:backgroundTint="#B3424242"
+                app:fabCustomSize="48dp"
+                app:maxImageSize="28dp"
+                app:srcCompat="@drawable/ic_undo_24"
+                app:tint="@android:color/white" />
+
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/fabRedo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:contentDescription="@string/action_redo"
+                app:backgroundTint="#B3424242"
+                app:fabCustomSize="48dp"
+                app:maxImageSize="28dp"
+                app:srcCompat="@drawable/ic_redo_24"
+                app:tint="@android:color/white" />
+
+        </LinearLayout>
+
     </FrameLayout>
 
     <!-- Controls panel: fragment + bottom nav (hidden until image loaded) -->

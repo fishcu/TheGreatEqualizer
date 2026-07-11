@@ -24,20 +24,19 @@ class ZonedTintFragment : Fragment() {
         wheelHighlights = view.findViewById(R.id.wheel_highlights)
 
         // Set initial positions from current params
-        val params = (requireActivity() as MainActivity).pipelineParams
-        wheelShadows.setTint(params.shadowTintAngle, params.shadowTintStrength)
-        wheelMidtones.setTint(params.midtoneTintAngle, params.midtoneTintStrength)
-        wheelHighlights.setTint(params.highlightTintAngle, params.highlightTintStrength)
+        val currentParams = (requireActivity() as MainActivity).pipelineParams
+        wheelShadows.setTint(currentParams.shadowTintAngle, currentParams.shadowTintStrength)
+        wheelMidtones.setTint(currentParams.midtoneTintAngle, currentParams.midtoneTintStrength)
+        wheelHighlights.setTint(currentParams.highlightTintAngle, currentParams.highlightTintStrength)
 
-        // Wire up callbacks
-        wheelShadows.onTintChanged = { angle, strength ->
-            notifyChanged { it.copy(shadowTintAngle = angle, shadowTintStrength = strength) }
+        bindWheel(wheelShadows, "Shadow tint") { params, angle, strength ->
+            params.copy(shadowTintAngle = angle, shadowTintStrength = strength)
         }
-        wheelMidtones.onTintChanged = { angle, strength ->
-            notifyChanged { it.copy(midtoneTintAngle = angle, midtoneTintStrength = strength) }
+        bindWheel(wheelMidtones, "Midtone tint") { params, angle, strength ->
+            params.copy(midtoneTintAngle = angle, midtoneTintStrength = strength)
         }
-        wheelHighlights.onTintChanged = { angle, strength ->
-            notifyChanged { it.copy(highlightTintAngle = angle, highlightTintStrength = strength) }
+        bindWheel(wheelHighlights, "Highlight tint") { params, angle, strength ->
+            params.copy(highlightTintAngle = angle, highlightTintStrength = strength)
         }
     }
 
@@ -49,8 +48,17 @@ class ZonedTintFragment : Fragment() {
         wheelHighlights.setTint(params.highlightTintAngle, params.highlightTintStrength)
     }
 
-    private fun notifyChanged(transform: (PipelineParams) -> PipelineParams) {
-        val main = activity as? MainActivity ?: return
-        main.onParamsChanged(transform(main.pipelineParams))
+    private fun bindWheel(
+        wheel: ColorWheelView,
+        label: String,
+        transform: (PipelineParams, Float, Float) -> PipelineParams
+    ) {
+        val main = requireActivity() as MainActivity
+        wheel.onInteractionStart = { main.beginParameterEdit(label) }
+        wheel.onDoubleTapReset = { main.mergeActiveEditWithPrevious() }
+        wheel.onTintChanged = { angle, strength ->
+            main.previewParameterEdit(transform(main.pipelineParams, angle, strength))
+        }
+        wheel.onInteractionEnd = { main.commitParameterEdit() }
     }
 }

@@ -38,11 +38,25 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
+
+    private data class EditEntry(
+        val label: String,
+        val before: PipelineParams,
+        val after: PipelineParams,
+        val navigationItemId: Int
+    )
+
+    private data class ActiveEdit(
+        val label: String,
+        val before: PipelineParams,
+        val navigationItemId: Int
+    )
 
     private enum class GpuStatus {
         INITIALIZING,
@@ -56,6 +70,9 @@ class MainActivity : AppCompatActivity() {
         private const val HIRES_ZOOM_THRESHOLD = 1.5f
         private const val HIRES_DEBOUNCE_MS = 150L
         private const val HIRES_PADDING = 0.2f  // 20% extra on each side
+        private const val MAX_EDIT_HISTORY = 100
+        private const val ENABLED_HISTORY_ALPHA = 0.9f
+        private const val DISABLED_HISTORY_ALPHA = 0.3f
     }
 
     private lateinit var imageView: ZoomableImageView
@@ -64,6 +81,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fabExport: FloatingActionButton
     private lateinit var fabShare: FloatingActionButton
     private lateinit var fabRandomize: FloatingActionButton
+    private lateinit var editHistoryControls: View
+    private lateinit var fabUndo: FloatingActionButton
+    private lateinit var fabRedo: FloatingActionButton
     private lateinit var controlsPanel: View
     private lateinit var bottomNav: BottomNavigationView
     private var currentNavItemId: Int = R.id.nav_light
@@ -82,6 +102,9 @@ class MainActivity : AppCompatActivity() {
         private set
     var pipelineParams: PipelineParams = PipelineParams()
         private set
+    private val undoHistory = ArrayDeque<EditEntry>()
+    private val redoHistory = ArrayDeque<EditEntry>()
+    private var activeEdit: ActiveEdit? = null
     private var isRendering = false
     private var renderJob: Job? = null
     private var pendingParams: PipelineParams? = null
@@ -109,7 +132,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         bindViews()
 
-        shakeDetector = ShakeDetector(this) { runOnUiThread { randomizeParams() } }
+        shakeDetector = ShakeDetector(this) { runOnUiThread { randomizeParams("Shake randomize") } }
 
         // Set initial fragment
         if (savedInstanceState == null) {
@@ -161,6 +184,9 @@ class MainActivity : AppCompatActivity() {
         fabExport = findViewById(R.id.fabExport)
         fabShare = findViewById(R.id.fabShare)
         fabRandomize = findViewById(R.id.fabRandomize)
+        editHistoryControls = findViewById(R.id.editHistoryControls)
+        fabUndo = findViewById(R.id.fabUndo)
+        fabRedo = findViewById(R.id.fabRedo)
         controlsPanel = findViewById(R.id.controlsPanel)
         bottomNav = findViewById(R.id.bottomNav)
 
@@ -170,7 +196,10 @@ class MainActivity : AppCompatActivity() {
         fabLoad.setOnClickListener { pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
         fabExport.setOnClickListener { exportImage() }
         fabShare.setOnClickListener { shareImage() }
-        fabRandomize.setOnClickListener { randomizeParams() }
+        fabRandomize.setOnClickListener { randomizeParams("Randomize") }
+        fabUndo.setOnClickListener { undoLastEdit() }
+        fabRedo.setOnClickListener { redoLastEdit() }
+        updateHistoryButtons()
 
         // Bottom navigation to swap fragments
         bottomNav.setOnItemSelectedListener { item ->
@@ -197,7 +226,7 @@ class MainActivity : AppCompatActivity() {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                if (isTouchOnImageView(event)) {
+                if (isTouchOnImageView(event) && !isTouchOnImageAction(event)) {
                     val orig = originalBitmap
                     val proc = processedBitmap
                     if (orig != null && proc != null) {
@@ -251,16 +280,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun isTouchOnImageView(event: MotionEvent): Boolean {
+        return isTouchInside(imageView, event)
+    }
+
+    private fun isTouchOnImageAction(event: MotionEvent): Boolean {
+        return listOf(fabLoad, fabExport, fabShare, fabRandomize, fabUndo, fabRedo)
+            .any { isTouchInside(it, event) }
+    }
+
+    private fun isTouchInside(view: View, event: MotionEvent): Boolean {
         val loc = IntArray(2)
-        imageView.getLocationOnScreen(loc)
+        view.getLocationOnScreen(loc)
         val x = event.rawX
         val y = event.rawY
-        return x >= loc[0] && x <= loc[0] + imageView.width &&
-               y >= loc[1] && y <= loc[1] + imageView.height
+        return x >= loc[0] && x <= loc[0] + view.width &&
+               y >= loc[1] && y <= loc[1] + view.height
     }
 
     private fun showImageLoaded() {
         addPhotoOverlay.visibility = View.GONE
+        editHistoryControls.visibility = View.VISIBLE
+        updateHistoryButtons()
     }
 
     private fun handleImageShareIntent(intent: Intent) {
@@ -291,6 +331,7 @@ class MainActivity : AppCompatActivity() {
             val bitmap = loadBitmapFromUri(uri)
 
             if (bitmap != null) {
+                clearEditHistory()
                 imageGeneration++
                 imageProcessingJob?.cancel()
                 renderJob?.cancel()
@@ -366,6 +407,7 @@ class MainActivity : AppCompatActivity() {
                 state.processedBitmap = outBitmap
                 imageView.setImageBitmap(outBitmap)
                 notifyFragmentUpdate()
+                updateHistoryButtons()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -388,7 +430,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun randomizeParams() {
+    private fun randomizeParams(label: String) {
         if (!pipelineState.isImageLoaded()) return
         val rng = java.util.Random()
         val defaults = PipelineParams()
@@ -436,16 +478,110 @@ class MainActivity : AppCompatActivity() {
             vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
         }
 
-        onParamsChanged(newParams)
+        applyParameterEdit(label, newParams, currentNavItemId)
+    }
+
+    fun beginParameterEdit(label: String) {
+        if (!pipelineState.isImageLoaded() || activeEdit != null) return
+        activeEdit = ActiveEdit(label, pipelineParams, currentNavItemId)
+        updateHistoryButtons()
+    }
+
+    fun previewParameterEdit(params: PipelineParams) {
+        renderParams(params)
+    }
+
+    fun mergeActiveEditWithPrevious() {
+        val active = activeEdit ?: return
+        val previous = undoHistory.peekLast() ?: return
+        if (
+            previous.label != active.label ||
+            previous.after != active.before ||
+            previous.navigationItemId != active.navigationItemId
+        ) return
+        undoHistory.removeLast()
+        activeEdit = active.copy(before = previous.before)
+    }
+
+    fun commitParameterEdit() {
+        val edit = activeEdit ?: return
+        activeEdit = null
+        recordEdit(edit.label, edit.before, pipelineParams, edit.navigationItemId)
+        updateHistoryButtons()
+    }
+
+    fun applyParameterEdit(label: String, params: PipelineParams, navigationItemId: Int) {
+        commitParameterEdit()
+        val before = pipelineParams
+        renderParams(params)
+        recordEdit(label, before, params, navigationItemId)
         notifyFragmentUpdate()
+        updateHistoryButtons()
+    }
+
+    private fun recordEdit(
+        label: String,
+        before: PipelineParams,
+        after: PipelineParams,
+        navigationItemId: Int
+    ) {
+        if (before == after) return
+        undoHistory.addLast(EditEntry(label, before, after, navigationItemId))
+        while (undoHistory.size > MAX_EDIT_HISTORY) {
+            undoHistory.removeFirst()
+        }
+        redoHistory.clear()
+    }
+
+    private fun undoLastEdit() {
+        if (activeEdit != null || undoHistory.isEmpty()) return
+        val edit = undoHistory.removeLast()
+        redoHistory.addLast(edit)
+        renderParams(edit.before)
+        showEditTab(edit.navigationItemId)
+        updateHistoryButtons()
+    }
+
+    private fun redoLastEdit() {
+        if (activeEdit != null || redoHistory.isEmpty()) return
+        val edit = redoHistory.removeLast()
+        undoHistory.addLast(edit)
+        renderParams(edit.after)
+        showEditTab(edit.navigationItemId)
+        updateHistoryButtons()
+    }
+
+    private fun showEditTab(navigationItemId: Int) {
+        if (bottomNav.selectedItemId == navigationItemId) {
+            notifyFragmentUpdate()
+        } else {
+            bottomNav.selectedItemId = navigationItemId
+        }
+    }
+
+    private fun clearEditHistory() {
+        activeEdit = null
+        undoHistory.clear()
+        redoHistory.clear()
+        updateHistoryButtons()
+    }
+
+    private fun updateHistoryButtons() {
+        if (!::fabUndo.isInitialized || !::fabRedo.isInitialized) return
+        val canUseHistory = activeEdit == null && pipelineState.isImageLoaded()
+        val canUndo = canUseHistory && undoHistory.isNotEmpty()
+        val canRedo = canUseHistory && redoHistory.isNotEmpty()
+        fabUndo.isEnabled = canUndo
+        fabRedo.isEnabled = canRedo
+        fabUndo.alpha = if (canUndo) ENABLED_HISTORY_ALPHA else DISABLED_HISTORY_ALPHA
+        fabRedo.alpha = if (canRedo) ENABLED_HISTORY_ALPHA else DISABLED_HISTORY_ALPHA
     }
 
     /**
-     * Called by fragments when slider values change.
-     * Uses 'render latest' pattern: renders as fast as the GPU allows,
-     * always converging to the most recent params.
+     * Render the latest parameter snapshot. Intermediate gesture previews use
+     * this without touching history; committed edits record their boundary.
      */
-    fun onParamsChanged(params: PipelineParams) {
+    private fun renderParams(params: PipelineParams) {
         pipelineParams = params
         if (gpuStatus != GpuStatus.READY) return
         val lut = gamutLut

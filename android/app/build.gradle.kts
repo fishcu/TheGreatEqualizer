@@ -51,7 +51,7 @@ android {
         minSdk = 28
         targetSdk = 35
         versionCode = getGitCommitCount()
-        versionName = "1.1.1"
+        versionName = "1.2.1"
 
         buildConfigField("String", "GIT_HASH", "\"${getGitHash()}\"")
     }

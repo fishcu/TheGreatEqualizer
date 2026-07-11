@@ -183,14 +183,13 @@ class LightFragment : Fragment() {
             val main = activity as? MainActivity ?: return@setOnClickListener
             val state = main.pipelineState
             if (!state.isImageLoaded()) return@setOnClickListener
+            val paramsAtPress = main.pipelineParams
 
             viewLifecycleOwner.lifecycleScope.launch {
                 val fitted = withContext(Dispatchers.Default) {
-                    ImagePipeline.fitToInput(state, main.pipelineParams, "light")
+                    ImagePipeline.fitToInput(state, paramsAtPress, "light")
                 }
-                setSliderValues(fitted)
-                updateTickMarks()
-                main.onParamsChanged(fitted)
+                main.applyParameterEdit("Fit light", fitted, R.id.nav_light)
             }
         }
     }
@@ -213,6 +212,7 @@ class LightFragment : Fragment() {
                 override fun onDoubleTap(e: MotionEvent): Boolean {
                     if (lastTouchWasDrag) return false
                     val defaultVal = neutralDefaults[slider.id] ?: return false
+                    (activity as? MainActivity)?.mergeActiveEditWithPrevious()
                     ignoreUntilUp = true
                     slider.value = defaultVal.coerceIn(slider.valueFrom, slider.valueTo)
                     notifyChangedForSlider(slider)
@@ -220,10 +220,16 @@ class LightFragment : Fragment() {
                 }
             })
         slider.setOnTouchListener { _, event ->
+            val main = activity as? MainActivity
             when (event.action) {
-                MotionEvent.ACTION_DOWN -> downValue = slider.value
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                MotionEvent.ACTION_DOWN -> {
+                    downValue = slider.value
+                    main?.beginParameterEdit(editLabel(slider.id))
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     lastTouchWasDrag = slider.value != downValue
+                    main?.commitParameterEdit()
+                }
             }
             detector.onTouchEvent(event)
             if (ignoreUntilUp) {
@@ -248,6 +254,17 @@ class LightFragment : Fragment() {
             R.id.slider_light_blacks -> notifyChanged { it.copy(lightBlacks = v) }
             R.id.slider_light_whites -> notifyChanged { it.copy(lightWhites = v) }
         }
+    }
+
+    private fun editLabel(sliderId: Int): String = when (sliderId) {
+        R.id.slider_light_smoothing -> "Light smoothing"
+        R.id.slider_light_shadows -> "Light shadows"
+        R.id.slider_light_highlights -> "Light highlights"
+        R.id.slider_light_midtone_balance -> "Light midtone balance"
+        R.id.slider_light_midtone_contrast -> "Light midtone contrast"
+        R.id.slider_light_blacks -> "Light lift"
+        R.id.slider_light_whites -> "Light gain"
+        else -> error("Unknown light slider: $sliderId")
     }
 
     private fun checkHapticAndSnap(slider: Slider, newValue: Float): Float {
@@ -380,7 +397,7 @@ class LightFragment : Fragment() {
 
     private fun notifyChanged(transform: (PipelineParams) -> PipelineParams) {
         val main = activity as? MainActivity ?: return
-        main.onParamsChanged(transform(main.pipelineParams))
+        main.previewParameterEdit(transform(main.pipelineParams))
     }
 
     private fun fmt(value: Float): String = String.format("%.2f", value)
