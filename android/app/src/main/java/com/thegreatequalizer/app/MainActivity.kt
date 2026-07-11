@@ -28,11 +28,13 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomnavigation.BottomNavigationView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -41,6 +43,12 @@ import kotlin.math.abs
 import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
+
+    private enum class GpuStatus {
+        INITIALIZING,
+        READY,
+        UNAVAILABLE
+    }
 
     companion object {
         private const val TAG = "TheGreatEqualizer"
@@ -61,8 +69,11 @@ class MainActivity : AppCompatActivity() {
     private var currentNavItemId: Int = R.id.nav_light
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
-    private var gamutLut: FloatArray? = null
-    private var gpuPipeline: GpuPipeline? = null
+    private lateinit var gamutLut: FloatArray
+    private lateinit var gpuPipeline: GpuPipeline
+    private var gpuStatus = GpuStatus.INITIALIZING
+    private var gpuFailureDetail = ""
+    private var gpuErrorDialog: AlertDialog? = null
     private val gpuDispatcher = Executors.newSingleThreadExecutor { r ->
         Thread(r, "gpu-pipeline").also { it.isDaemon = true }
     }.asCoroutineDispatcher()
@@ -72,8 +83,11 @@ class MainActivity : AppCompatActivity() {
     var pipelineParams: PipelineParams = PipelineParams()
         private set
     private var isRendering = false
+    private var renderJob: Job? = null
     private var pendingParams: PipelineParams? = null
     private var renderGeneration = 0L
+    private var imageGeneration = 0L
+    private var imageProcessingJob: Job? = null
     private var isShowingOriginal = false
     private var multiTouchActive = false
     private var abDelayJob: Job? = null
@@ -104,15 +118,15 @@ class MainActivity : AppCompatActivity() {
                 .commit()
         }
 
-        // Pre-build gamut LUT and init GPU
-        lifecycleScope.launch {
-            gamutLut = withContext(Dispatchers.Default) {
-                OkLab.buildGamutLut()
-            }
-            Log.i(TAG, "Gamut LUT built")
+        initializeGpuPipeline()
 
-            initGpuPipeline()
-        }
+        handleImageShareIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleImageShareIntent(intent)
     }
 
     override fun onResume() {
@@ -249,14 +263,46 @@ class MainActivity : AppCompatActivity() {
         addPhotoOverlay.visibility = View.GONE
     }
 
+    private fun handleImageShareIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) {
+            return
+        }
+
+        val uri = sharedImageUri(intent)
+        if (uri == null) {
+            Toast.makeText(this, "No image was included in the share", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        loadImageFromUri(uri)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedImageUri(intent: Intent): Uri? {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        }
+    }
+
     private fun loadImageFromUri(uri: Uri) {
         try {
             val bitmap = loadBitmapFromUri(uri)
 
             if (bitmap != null) {
+                imageGeneration++
+                imageProcessingJob?.cancel()
+                renderJob?.cancel()
+                renderJob = null
+                isRendering = false
                 invalidateHiResCrop()
                 originalBitmap = bitmap
                 processedBitmap = null
+                pipelineState = PipelineState()
+                pipelineParams = PipelineParams()
+                pendingParams = null
+                renderGeneration++
                 imageView.setImageBitmap(bitmap)
                 showImageLoaded()
                 processImage()
@@ -276,75 +322,59 @@ class MainActivity : AppCompatActivity() {
 
     private fun processImage() {
         val src = originalBitmap ?: return
+        when (gpuStatus) {
+            GpuStatus.INITIALIZING -> return
+            GpuStatus.UNAVAILABLE -> {
+                showGpuUnavailableDialog()
+                return
+            }
+            GpuStatus.READY -> Unit
+        }
+
+        val generation = imageGeneration
         val lut = gamutLut
         val gpu = gpuPipeline
-
-        if (gpu != null && lut != null) {
-            // Staged GPU pipeline
-            lifecycleScope.launch {
-                val startMs = System.currentTimeMillis()
-                try {
-                    // Pass 1: run once for this image
-                    val state = withContext(gpuDispatcher) {
-                        ImagePipeline.processPass1Only(src, lut, gpu)
-                    }
-                    pipelineState = state
-
-                    // Fit both channels to get initial params
-                    var params = PipelineParams()
-                    params = withContext(Dispatchers.Default) {
-                        ImagePipeline.fitToInput(state, params, "light")
-                    }
-                    params = withContext(Dispatchers.Default) {
-                        ImagePipeline.fitToInput(state, params, "color")
-                    }
-                    pipelineParams = params
-
-                    // Pass 2: render with fitted params
-                    val outBitmap = withContext(gpuDispatcher) {
-                        ImagePipeline.processFromParams(state, params, lut, gpu)
-                    }
-
-                    val elapsed = System.currentTimeMillis() - startMs
-                    Log.i(TAG, "Staged GPU processing took ${elapsed}ms")
-
-                    processedBitmap = outBitmap
-                    pipelineState.processedBitmap = outBitmap
-                    imageView.setImageBitmap(outBitmap)
-
-                    // Update fragment sliders + tick marks for the new fitted values
-                    notifyFragmentUpdate()
-
-                } catch (e: Exception) {
-                    Log.e(TAG, "Processing error", e)
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Processing error: ${e.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
+        imageProcessingJob?.cancel()
+        imageProcessingJob = lifecycleScope.launch {
+            val startMs = System.currentTimeMillis()
+            try {
+                val state = withContext(gpuDispatcher) {
+                    ImagePipeline.processPass1Only(src, lut, gpu)
                 }
-            }
-        } else {
-            // Fallback: old CPU pipeline
-            lifecycleScope.launch {
-                val startMs = System.currentTimeMillis()
-                try {
-                    val result = withContext(Dispatchers.Default) {
-                        ImagePipeline.process(src, lut)
-                    }
-                    val elapsed = System.currentTimeMillis() - startMs
-                    Log.i(TAG, "CPU processing took ${elapsed}ms")
+                if (generation != imageGeneration) return@launch
 
-                    processedBitmap = result.outputBitmap
-                    imageView.setImageBitmap(result.outputBitmap)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Processing error", e)
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Processing error: ${e.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                var params = PipelineParams()
+                params = withContext(Dispatchers.Default) {
+                    ImagePipeline.fitToInput(state, params, "light")
                 }
+                params = withContext(Dispatchers.Default) {
+                    ImagePipeline.fitToInput(state, params, "color")
+                }
+                if (generation != imageGeneration) return@launch
+
+                val outBitmap = withContext(gpuDispatcher) {
+                    ImagePipeline.processFromParams(state, params, lut, gpu)
+                }
+                if (generation != imageGeneration) return@launch
+
+                val elapsed = System.currentTimeMillis() - startMs
+                Log.i(TAG, "Staged GPU processing took ${elapsed}ms")
+
+                pipelineState = state
+                pipelineParams = params
+                processedBitmap = outBitmap
+                state.processedBitmap = outBitmap
+                imageView.setImageBitmap(outBitmap)
+                notifyFragmentUpdate()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.e(TAG, "Processing error", error)
+                Toast.makeText(
+                    this@MainActivity,
+                    "Processing error: ${error.message}",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         }
     }
@@ -417,8 +447,9 @@ class MainActivity : AppCompatActivity() {
      */
     fun onParamsChanged(params: PipelineParams) {
         pipelineParams = params
-        val lut = gamutLut ?: return
-        val gpu = gpuPipeline ?: return
+        if (gpuStatus != GpuStatus.READY) return
+        val lut = gamutLut
+        val gpu = gpuPipeline
         val state = pipelineState
         if (!state.isImageLoaded()) return
 
@@ -436,27 +467,33 @@ class MainActivity : AppCompatActivity() {
     private fun startRender(state: PipelineState, lut: FloatArray, gpu: GpuPipeline) {
         val paramsToRender = pendingParams ?: return
         val genAtStart = renderGeneration
+        val imageGenAtStart = imageGeneration
         isRendering = true
 
-        lifecycleScope.launch {
+        renderJob = lifecycleScope.launch {
             try {
                 val outBitmap = withContext(gpuDispatcher) {
                     ImagePipeline.processFromParams(state, paramsToRender, lut, gpu)
                 }
+                if (imageGenAtStart != imageGeneration) return@launch
                 processedBitmap = outBitmap
                 state.processedBitmap = outBitmap
                 if (!isShowingOriginal) {
                     updateImageBitmap(outBitmap)
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (e: Exception) {
                 Log.e(TAG, "Render error", e)
             } finally {
-                isRendering = false
-                if (renderGeneration != genAtStart) {
-                    startRender(state, lut, gpu)
-                } else {
-                    // Low-res is up to date — kick off hi-res crop if zoomed
-                    maybeStartHiResCrop()
+                if (imageGenAtStart == imageGeneration) {
+                    isRendering = false
+                    if (renderGeneration != genAtStart) {
+                        startRender(state, lut, gpu)
+                    } else {
+                        // Low-res is up to date — kick off hi-res crop if zoomed
+                        maybeStartHiResCrop()
+                    }
                 }
             }
         }
@@ -526,8 +563,9 @@ class MainActivity : AppCompatActivity() {
         val orig = originalBitmap ?: return
         val state = pipelineState
         val params = pipelineParams
-        val lut = gamutLut ?: return
-        val gpu = gpuPipeline ?: return
+        if (gpuStatus != GpuStatus.READY) return
+        val lut = gamutLut
+        val gpu = gpuPipeline
         if (!state.isImageLoaded()) return
 
         // Get visible rect in the 1024px image coordinates
@@ -605,17 +643,24 @@ class MainActivity : AppCompatActivity() {
         val orig = originalBitmap
         val state = pipelineState
         val params = pipelineParams
-        val lut = gamutLut
-        val gpu = gpuPipeline
 
         if (orig == null || !state.isImageLoaded()) {
             Toast.makeText(this, "No processed image to export", Toast.LENGTH_SHORT).show()
             return
         }
+        if (gpuStatus != GpuStatus.READY) {
+            if (gpuStatus == GpuStatus.UNAVAILABLE) {
+                showGpuUnavailableDialog()
+            } else {
+                Toast.makeText(this, "GPU processing is still initializing", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val lut = gamutLut
+        val gpu = gpuPipeline
 
-        // If no GPU or image fits in preview, use existing processedBitmap
-        if (gpu == null || lut == null ||
-            maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+        // Images that fit in the preview already have a full-resolution render.
+        if (maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
             val bitmap = processedBitmap ?: return
             lifecycleScope.launch { action(bitmap) }
             return
@@ -739,28 +784,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun initGpuPipeline() {
-        val lut = gamutLut ?: return
-        if (gpuPipeline != null) return
-
+    private fun initializeGpuPipeline() {
+        gpuStatus = GpuStatus.INITIALIZING
         lifecycleScope.launch {
             try {
+                val lut = withContext(Dispatchers.Default) {
+                    OkLab.buildGamutLut()
+                }
+                Log.i(TAG, "Gamut LUT built")
+
                 val pipeline = GpuPipeline()
                 withContext(gpuDispatcher) {
                     pipeline.init(this@MainActivity, lut)
                 }
+                gamutLut = lut
                 gpuPipeline = pipeline
+                gpuStatus = GpuStatus.READY
                 Log.i(TAG, "GPU compute pipeline initialized (GLES 3.1)")
-            } catch (e: Exception) {
-                Log.e(TAG, "GPU init failed, falling back to CPU", e)
+
+                processImage()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                gpuStatus = GpuStatus.UNAVAILABLE
+                gpuFailureDetail = error.message ?: error.javaClass.simpleName
+                Log.e(TAG, "GPU initialization failed", error)
+                showGpuUnavailableDialog()
             }
         }
     }
 
+    private fun showGpuUnavailableDialog() {
+        if (gpuErrorDialog?.isShowing == true || isFinishing || isDestroyed) return
+
+        gpuErrorDialog = AlertDialog.Builder(this)
+            .setTitle("GPU processing unavailable")
+            .setMessage(
+                "The Great Equalizer requires OpenGL ES 3.1 compute support. " +
+                    "This device or graphics driver could not initialize the required pipeline.\n\n" +
+                    gpuFailureDetail
+            )
+            .setCancelable(false)
+            .setPositiveButton("Close app") { _, _ -> finishAndRemoveTask() }
+            .create()
+        gpuErrorDialog?.show()
+    }
+
     override fun onDestroy() {
-        super.onDestroy()
-        gpuPipeline?.release()
-        gpuPipeline = null
+        imageProcessingJob?.cancel()
+        renderJob?.cancel()
+        gpuErrorDialog?.dismiss()
+        if (gpuStatus == GpuStatus.READY) {
+            runBlocking {
+                withContext(gpuDispatcher) {
+                    gpuPipeline.release()
+                }
+            }
+        }
         gpuDispatcher.close()
+        super.onDestroy()
     }
 }

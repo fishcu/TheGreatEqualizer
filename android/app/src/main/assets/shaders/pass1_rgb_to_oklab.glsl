@@ -1,27 +1,27 @@
 #version 310 es
-// Pass 1: sRGB pixels → OKLab L, a, b + relative chroma + hue
+// Pass 1: sRGB pixels → OKLab L + relative chroma + hue
 // Input:  ARGB packed uint pixels
-// Output: L[], a[], b[], C_rel[], hue[] float arrays
+// Output: interleaved (L, C_rel) pairs + hue
 //
 // Steps covered: 1 (sRGB EOTF), 2 (RGB→OKLab), 4 (relative chroma)
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 128) in;
 
-// Pixel data
+// Binding layout stays within the four SSBOs guaranteed by GLES 3.1.
 layout(std430, binding = 0) readonly buffer PixelInput {
     uint pixels[];  // ARGB packed: (A<<24)|(R<<16)|(G<<8)|B
 };
 
-// Output channels (one float per pixel)
-layout(std430, binding = 1) writeonly buffer OutL    { float outL[];    };
-layout(std430, binding = 2) writeonly buffer OutA    { float outA[];    };
-layout(std430, binding = 3) writeonly buffer OutB    { float outB[];    };
-layout(std430, binding = 4) writeonly buffer OutCrel { float outCrel[]; };
-layout(std430, binding = 5) writeonly buffer OutHue  { float outHue[];  };
+layout(std430, binding = 1) writeonly buffer AnalysisOutput {
+    vec2 analysis[];  // x=L, y=C_rel
+};
 
-// Gamut LUT: 256 L levels × 360 hue steps, row-major
-layout(std430, binding = 6) readonly buffer GamutLUT {
-    float gamutLut[];  // index = iL * 360 + iH
+layout(std430, binding = 2) writeonly buffer HueOutput {
+    float outHue[];
+};
+
+layout(std430, binding = 3) readonly buffer LookupData {
+    float lookupData[];  // gamut LUT starts at offset 0
 };
 
 uniform uint uPixelCount;
@@ -56,10 +56,10 @@ float lookupGamutMax(float L_val, float h) {
     int row0 = li0 * GAMUT_N_H;
     int row1 = li1 * GAMUT_N_H;
 
-    return gamutLut[row0 + hi0] * oneMinusFl * oneMinusFh
-         + gamutLut[row0 + hi1] * oneMinusFl * fh
-         + gamutLut[row1 + hi0] * fl * oneMinusFh
-         + gamutLut[row1 + hi1] * fl * fh;
+    return lookupData[row0 + hi0] * oneMinusFl * oneMinusFh
+         + lookupData[row0 + hi1] * oneMinusFl * fh
+         + lookupData[row1 + hi0] * fl * oneMinusFh
+         + lookupData[row1 + hi1] * fl * fh;
 }
 
 // ── M1: linear sRGB → pre-nonlinearity LMS ──
@@ -112,9 +112,6 @@ void main() {
     float cRel = (cMax > 1e-10) ? clamp(C / max(cMax, 1e-10), 0.0, 1.0) : 0.0;
 
     // Write outputs
-    outL[idx] = L;
-    outA[idx] = aVal;
-    outB[idx] = bVal;
-    outCrel[idx] = cRel;
+    analysis[idx] = vec2(L, cRel);
     outHue[idx] = h;
 }

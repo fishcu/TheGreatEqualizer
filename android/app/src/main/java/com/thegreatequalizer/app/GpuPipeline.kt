@@ -15,14 +15,27 @@ import java.nio.IntBuffer
  * Must be called from a single thread (the calling thread becomes the GL thread).
  *
  * Two-pass pipeline:
- *   Pass 1: ARGB pixels → OKLab L, a, b, C_rel, hue (7 SSBOs)
- *   Pass 2: Transfer LUTs + CDF → reconstructed ARGB pixels (8 SSBOs)
+ *   Pass 1: ARGB pixels → OKLab L, C_rel, hue
+ *   Pass 2: Transfer LUTs + CDF → reconstructed ARGB pixels
+ *
+ * Both passes use the four SSBOs guaranteed by the GLES 3.1 specification.
  */
 class GpuPipeline {
 
     companion object {
         private const val TAG = "GpuPipeline"
-        private const val WORKGROUP_SIZE = 256
+        private const val WORKGROUP_SIZE = 128
+        private const val REQUIRED_SSBO_BLOCKS = 4
+        private const val NUM_BINS = 256
+        private const val GAMUT_FLOAT_COUNT = 256 * 360
+        private const val TRANSFER_L_OFFSET = GAMUT_FLOAT_COUNT
+        private const val TRANSFER_C_OFFSET = TRANSFER_L_OFFSET + NUM_BINS
+        private const val CDF_OFFSET = TRANSFER_C_OFFSET + NUM_BINS
+        private const val LOOKUP_FLOAT_COUNT = CDF_OFFSET + NUM_BINS
+        private const val PIXEL_BINDING = 0
+        private const val ANALYSIS_BINDING = 1
+        private const val HUE_BINDING = 2
+        private const val LOOKUP_BINDING = 3
     }
 
     // EGL handles
@@ -50,16 +63,10 @@ class GpuPipeline {
     private var pass2HiAngleLoc = 0
     private var pass2HiStrLoc = 0
 
-    // Pass 1 SSBOs: binding 0=pixelInput, 1=outL, 2=outA, 3=outB, 4=outCrel, 5=outHue, 6=gamutLut
-    private var pass1Ssbos = IntArray(7)
-
-    // Pass 2 SSBOs: binding 0=inL, 1=inCrel, 2=inHue, 3=transferL, 4=transferC, 5=cdfValues, 6=gamutLut, 7=outPixels
-    private var pass2Ssbos = IntArray(8)
-
-    // Shared SSBOs (allocated once for max size, reused)
-    private var gamutLutSsbo = 0
-
+    // binding 0=pixel input/output, 1=interleaved L/C_rel, 2=hue, 3=all lookup data
+    private val ssbos = IntArray(REQUIRED_SSBO_BLOCKS)
     private var maxPixelCount = 0
+    private var maxShaderStorageBlockSize = 0L
     private var initialized = false
 
     /**
@@ -71,40 +78,46 @@ class GpuPipeline {
     )
 
     /**
-     * Initialize EGL context, compile shaders, create gamut LUT SSBO.
+     * Initialize EGL, validate the required GLES 3.1 capabilities, compile
+     * shaders, and create the shared lookup-data SSBO.
      * Must be called before any processing.
      */
     fun init(context: Context, gamutLut: FloatArray) {
-        initEgl()
-        pass1Program = loadComputeShader(context, "shaders/pass1_rgb_to_oklab.glsl")
-        pass2Program = loadComputeShader(context, "shaders/pass2_cdf_to_srgb.glsl")
+        check(gamutLut.size == GAMUT_FLOAT_COUNT) {
+            "Expected $GAMUT_FLOAT_COUNT gamut values, received ${gamutLut.size}"
+        }
 
-        // Get uniform locations
-        pass1PixelCountLoc = GLES31.glGetUniformLocation(pass1Program, "uPixelCount")
+        try {
+            initEgl()
+            validateCapabilities()
+            pass1Program = loadComputeShader(context, "shaders/pass1_rgb_to_oklab.glsl")
+            pass2Program = loadComputeShader(context, "shaders/pass2_cdf_to_srgb.glsl")
 
-        pass2PixelCountLoc = GLES31.glGetUniformLocation(pass2Program, "uPixelCount")
-        pass2BlackLLoc = GLES31.glGetUniformLocation(pass2Program, "uBlackL")
-        pass2WhiteLLoc = GLES31.glGetUniformLocation(pass2Program, "uWhiteL")
-        pass2BlackCLoc = GLES31.glGetUniformLocation(pass2Program, "uBlackC")
-        pass2WhiteCLoc = GLES31.glGetUniformLocation(pass2Program, "uWhiteC")
-        pass2ShAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uShAngle")
-        pass2ShStrLoc = GLES31.glGetUniformLocation(pass2Program, "uShStr")
-        pass2MidAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uMidAngle")
-        pass2MidStrLoc = GLES31.glGetUniformLocation(pass2Program, "uMidStr")
-        pass2HiAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uHiAngle")
-        pass2HiStrLoc = GLES31.glGetUniformLocation(pass2Program, "uHiStr")
+            pass1PixelCountLoc = GLES31.glGetUniformLocation(pass1Program, "uPixelCount")
 
-        // Create gamut LUT SSBO (shared between passes)
-        val gamutBuf = allocateFloatBuffer(gamutLut)
-        val ids = IntArray(1)
-        GLES31.glGenBuffers(1, ids, 0)
-        gamutLutSsbo = ids[0]
-        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, gamutLutSsbo)
-        GLES31.glBufferData(GLES31.GL_SHADER_STORAGE_BUFFER, gamutLut.size * 4, gamutBuf, GLES31.GL_STATIC_DRAW)
-        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
+            pass2PixelCountLoc = GLES31.glGetUniformLocation(pass2Program, "uPixelCount")
+            pass2BlackLLoc = GLES31.glGetUniformLocation(pass2Program, "uBlackL")
+            pass2WhiteLLoc = GLES31.glGetUniformLocation(pass2Program, "uWhiteL")
+            pass2BlackCLoc = GLES31.glGetUniformLocation(pass2Program, "uBlackC")
+            pass2WhiteCLoc = GLES31.glGetUniformLocation(pass2Program, "uWhiteC")
+            pass2ShAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uShAngle")
+            pass2ShStrLoc = GLES31.glGetUniformLocation(pass2Program, "uShStr")
+            pass2MidAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uMidAngle")
+            pass2MidStrLoc = GLES31.glGetUniformLocation(pass2Program, "uMidStr")
+            pass2HiAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uHiAngle")
+            pass2HiStrLoc = GLES31.glGetUniformLocation(pass2Program, "uHiStr")
 
-        initialized = true
-        Log.i(TAG, "GPU pipeline initialized")
+            GLES31.glGenBuffers(1, ssbos, LOOKUP_BINDING)
+            allocateSsbo(ssbos[LOOKUP_BINDING], LOOKUP_FLOAT_COUNT * 4)
+            uploadFloatBuffer(ssbos[LOOKUP_BINDING], 0, gamutLut)
+            checkGlError("lookup buffer initialization")
+
+            initialized = true
+            Log.i(TAG, "GPU pipeline initialized")
+        } catch (error: Exception) {
+            releaseResources()
+            throw error
+        }
     }
 
     /**
@@ -114,53 +127,24 @@ class GpuPipeline {
     private fun ensureBuffers(pixelCount: Int) {
         if (pixelCount <= maxPixelCount) return
 
-        // Delete old owned buffers if any
+        val pixelBytes = pixelCount * 4
+        val analysisBytes = pixelCount * 2 * 4
+        val hueBytes = pixelCount * 4
+        requireBlockSize("pixel", pixelBytes)
+        requireBlockSize("analysis", analysisBytes)
+        requireBlockSize("hue", hueBytes)
+
         if (maxPixelCount > 0) {
-            // Pass 1 owns bindings 0-5 (6 is shared gamut LUT)
-            val toDelete = IntArray(6) { pass1Ssbos[it] }
-            GLES31.glDeleteBuffers(6, toDelete, 0)
-            // Pass 2 owns only bindings 3,4,5,7 (0,1,2 shared with pass1; 6 is gamut LUT)
-            val toDelete2 = intArrayOf(pass2Ssbos[3], pass2Ssbos[4], pass2Ssbos[5], pass2Ssbos[7])
-            GLES31.glDeleteBuffers(4, toDelete2, 0)
+            GLES31.glDeleteBuffers(3, ssbos, PIXEL_BINDING)
         }
+
+        GLES31.glGenBuffers(3, ssbos, PIXEL_BINDING)
+        allocateSsbo(ssbos[PIXEL_BINDING], pixelBytes)
+        allocateSsbo(ssbos[ANALYSIS_BINDING], analysisBytes)
+        allocateSsbo(ssbos[HUE_BINDING], hueBytes)
+        checkGlError("per-pixel buffer allocation")
 
         maxPixelCount = pixelCount
-        val floatBytes = pixelCount * 4
-        val intBytes = pixelCount * 4
-
-        // Pass 1: generate 6 buffers for bindings 0-5
-        val pass1Ids = IntArray(6)
-        GLES31.glGenBuffers(6, pass1Ids, 0)
-        for (i in 0..5) pass1Ssbos[i] = pass1Ids[i]
-        pass1Ssbos[6] = gamutLutSsbo  // shared
-
-        // binding 0: pixel input (uint[pixelCount])
-        allocateSsbo(pass1Ssbos[0], intBytes)
-        // binding 1-5: outL, outA, outB, outCrel, outHue (float[pixelCount] each)
-        for (i in 1..5) {
-            allocateSsbo(pass1Ssbos[i], floatBytes)
-        }
-
-        // Pass 2: generate 4 buffers for bindings 3,4,5,7
-        val pass2Ids = IntArray(4)
-        GLES31.glGenBuffers(4, pass2Ids, 0)
-
-        // Shared from pass 1
-        pass2Ssbos[0] = pass1Ssbos[1]  // inL = outL from pass 1
-        pass2Ssbos[1] = pass1Ssbos[4]  // inCrel = outCrel from pass 1
-        pass2Ssbos[2] = pass1Ssbos[5]  // inHue = outHue from pass 1
-        // Owned by pass 2
-        pass2Ssbos[3] = pass2Ids[0]    // transferL (float[256])
-        pass2Ssbos[4] = pass2Ids[1]    // transferC (float[256])
-        pass2Ssbos[5] = pass2Ids[2]    // cdfValues (float[256])
-        pass2Ssbos[6] = gamutLutSsbo   // shared
-        pass2Ssbos[7] = pass2Ids[3]    // output pixels (uint[pixelCount])
-
-        allocateSsbo(pass2Ssbos[3], 256 * 4)
-        allocateSsbo(pass2Ssbos[4], 256 * 4)
-        allocateSsbo(pass2Ssbos[5], 256 * 4)
-        allocateSsbo(pass2Ssbos[7], intBytes)
-
         Log.i(TAG, "Allocated GPU buffers for $pixelCount pixels")
     }
 
@@ -176,25 +160,22 @@ class GpuPipeline {
 
         // Upload pixel data
         val pixelBuf = allocateIntBuffer(pixels)
-        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, pass1Ssbos[0])
+        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, ssbos[PIXEL_BINDING])
         GLES31.glBufferSubData(GLES31.GL_SHADER_STORAGE_BUFFER, 0, pixelCount * 4, pixelBuf)
 
-        // Bind all pass 1 SSBOs
-        for (i in 0..6) {
-            GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, i, pass1Ssbos[i])
+        for (binding in ssbos.indices) {
+            GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, binding, ssbos[binding])
         }
 
-        // Dispatch pass 1
         GLES31.glUseProgram(pass1Program)
         GLES30.glUniform1ui(pass1PixelCountLoc, pixelCount)
         GLES31.glDispatchCompute(numGroups, 1, 1)
-        GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
+        GLES31.glMemoryBarrier(
+            GLES31.GL_SHADER_STORAGE_BARRIER_BIT or GLES31.GL_BUFFER_UPDATE_BARRIER_BIT
+        )
+        checkGlError("pass 1 dispatch")
 
-        // Read back L (binding 1) and C_rel (binding 4)
-        val L = readBackFloatBuffer(pass1Ssbos[1], pixelCount)
-        val cRel = readBackFloatBuffer(pass1Ssbos[4], pixelCount)
-
-        return Pass1Result(L, cRel)
+        return readBackAnalysis(pixelCount)
     }
 
     /**
@@ -210,19 +191,18 @@ class GpuPipeline {
 
         // Upload pixel data
         val pixelBuf = allocateIntBuffer(pixels)
-        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, pass1Ssbos[0])
+        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, ssbos[PIXEL_BINDING])
         GLES31.glBufferSubData(GLES31.GL_SHADER_STORAGE_BUFFER, 0, pixelCount * 4, pixelBuf)
 
-        // Bind all pass 1 SSBOs
-        for (i in 0..6) {
-            GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, i, pass1Ssbos[i])
+        for (binding in ssbos.indices) {
+            GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, binding, ssbos[binding])
         }
 
-        // Dispatch pass 1
         GLES31.glUseProgram(pass1Program)
         GLES30.glUniform1ui(pass1PixelCountLoc, pixelCount)
         GLES31.glDispatchCompute(numGroups, 1, 1)
         GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
+        checkGlError("pass 1 dispatch")
     }
 
     /**
@@ -243,14 +223,12 @@ class GpuPipeline {
 
         val numGroups = (pixelCount + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE
 
-        // Upload transfer LUTs and CDF values
-        uploadFloatBuffer(pass2Ssbos[3], transferL)
-        uploadFloatBuffer(pass2Ssbos[4], transferC)
-        uploadFloatBuffer(pass2Ssbos[5], cdfValues)
+        uploadFloatBuffer(ssbos[LOOKUP_BINDING], TRANSFER_L_OFFSET * 4, transferL)
+        uploadFloatBuffer(ssbos[LOOKUP_BINDING], TRANSFER_C_OFFSET * 4, transferC)
+        uploadFloatBuffer(ssbos[LOOKUP_BINDING], CDF_OFFSET * 4, cdfValues)
 
-        // Bind all pass 2 SSBOs
-        for (i in 0..7) {
-            GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, i, pass2Ssbos[i])
+        for (binding in ssbos.indices) {
+            GLES31.glBindBufferBase(GLES31.GL_SHADER_STORAGE_BUFFER, binding, ssbos[binding])
         }
 
         // Set uniforms
@@ -269,43 +247,42 @@ class GpuPipeline {
 
         // Dispatch pass 2
         GLES31.glDispatchCompute(numGroups, 1, 1)
-        GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
+        GLES31.glMemoryBarrier(
+            GLES31.GL_SHADER_STORAGE_BARRIER_BIT or GLES31.GL_BUFFER_UPDATE_BARRIER_BIT
+        )
+        checkGlError("pass 2 dispatch")
 
         // Read back output pixels
-        return readBackIntBuffer(pass2Ssbos[7], pixelCount)
+        return readBackIntBuffer(ssbos[PIXEL_BINDING], pixelCount)
     }
 
     /**
      * Release all GPU resources.
      */
     fun release() {
-        if (!initialized) return
-
-        GLES31.glDeleteProgram(pass1Program)
-        GLES31.glDeleteProgram(pass2Program)
-
-        // Delete per-pixel buffers (skip shared gamut LUT references)
-        val toDelete = mutableListOf<Int>()
-        // Pass 1 owned: bindings 0-5 (not 6 which is gamutLut)
-        for (i in 0..5) {
-            if (pass1Ssbos[i] != 0) toDelete.add(pass1Ssbos[i])
-        }
-        // Pass 2 owned: bindings 3,4,5,7 (0,1,2 shared with pass1; 6 is gamutLut)
-        for (i in intArrayOf(3, 4, 5, 7)) {
-            if (pass2Ssbos[i] != 0 && pass2Ssbos[i] !in toDelete) toDelete.add(pass2Ssbos[i])
-        }
-        // Gamut LUT
-        toDelete.add(gamutLutSsbo)
-
-        if (toDelete.isNotEmpty()) {
-            val arr = toDelete.toIntArray()
-            GLES31.glDeleteBuffers(arr.size, arr, 0)
-        }
-
-        destroyEgl()
+        releaseResources()
         initialized = false
         maxPixelCount = 0
         Log.i(TAG, "GPU pipeline released")
+    }
+
+    private fun releaseResources() {
+        if (pass1Program != 0) {
+            GLES31.glDeleteProgram(pass1Program)
+            pass1Program = 0
+        }
+        if (pass2Program != 0) {
+            GLES31.glDeleteProgram(pass2Program)
+            pass2Program = 0
+        }
+
+        val allocatedSsbos = ssbos.filter { it != 0 }.toIntArray()
+        if (allocatedSsbos.isNotEmpty()) {
+            GLES31.glDeleteBuffers(allocatedSsbos.size, allocatedSsbos, 0)
+            ssbos.fill(0)
+        }
+
+        destroyEgl()
     }
 
     // ---------------------------------------------------------------
@@ -362,7 +339,78 @@ class GpuPipeline {
             throw RuntimeException("eglMakeCurrent failed")
         }
 
-        Log.i(TAG, "EGL initialized: GL_VERSION=${GLES31.glGetString(GLES31.GL_VERSION)}")
+        Log.i(TAG, "EGL initialized")
+    }
+
+    private fun validateCapabilities() {
+        val major = IntArray(1)
+        val minor = IntArray(1)
+        val maxInvocations = IntArray(1)
+        val maxWorkGroupSizeX = IntArray(1)
+        val maxStorageBlocks = IntArray(1)
+        val maxStorageBindings = IntArray(1)
+        val maxBlockSize = LongArray(1)
+
+        GLES31.glGetIntegerv(GLES30.GL_MAJOR_VERSION, major, 0)
+        GLES31.glGetIntegerv(GLES30.GL_MINOR_VERSION, minor, 0)
+        GLES31.glGetIntegerv(
+            GLES31.GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS,
+            maxInvocations,
+            0
+        )
+        GLES31.glGetIntegeri_v(
+            GLES31.GL_MAX_COMPUTE_WORK_GROUP_SIZE,
+            0,
+            maxWorkGroupSizeX,
+            0
+        )
+        GLES31.glGetIntegerv(
+            GLES31.GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS,
+            maxStorageBlocks,
+            0
+        )
+        GLES31.glGetIntegerv(
+            GLES31.GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS,
+            maxStorageBindings,
+            0
+        )
+        GLES30.glGetInteger64v(
+            GLES31.GL_MAX_SHADER_STORAGE_BLOCK_SIZE,
+            maxBlockSize,
+            0
+        )
+        checkGlError("GPU capability query")
+
+        val version = GLES31.glGetString(GLES31.GL_VERSION) ?: "unknown"
+        val renderer = GLES31.glGetString(GLES31.GL_RENDERER) ?: "unknown"
+        val vendor = GLES31.glGetString(GLES31.GL_VENDOR) ?: "unknown"
+        val details = "version=$version, renderer=$renderer, vendor=$vendor, " +
+            "workgroupInvocations=${maxInvocations[0]}, workgroupSizeX=${maxWorkGroupSizeX[0]}, " +
+            "computeStorageBlocks=${maxStorageBlocks[0]}, storageBindings=${maxStorageBindings[0]}, " +
+            "maxStorageBlockBytes=${maxBlockSize[0]}"
+        Log.i(TAG, "GPU capabilities: $details")
+
+        if (major[0] < 3 || (major[0] == 3 && minor[0] < 1)) {
+            throw UnsupportedOperationException("OpenGL ES 3.1 is required; $details")
+        }
+        if (maxInvocations[0] < WORKGROUP_SIZE || maxWorkGroupSizeX[0] < WORKGROUP_SIZE) {
+            throw UnsupportedOperationException(
+                "Compute workgroups of $WORKGROUP_SIZE invocations are required; $details"
+            )
+        }
+        if (maxStorageBlocks[0] < REQUIRED_SSBO_BLOCKS ||
+            maxStorageBindings[0] < REQUIRED_SSBO_BLOCKS) {
+            throw UnsupportedOperationException(
+                "$REQUIRED_SSBO_BLOCKS compute shader-storage blocks are required; $details"
+            )
+        }
+        if (maxBlockSize[0] < LOOKUP_FLOAT_COUNT * 4L) {
+            throw UnsupportedOperationException(
+                "Shader-storage blocks of at least ${LOOKUP_FLOAT_COUNT * 4L} bytes are required; $details"
+            )
+        }
+
+        maxShaderStorageBlockSize = maxBlockSize[0]
     }
 
     private fun destroyEgl() {
@@ -423,23 +471,36 @@ class GpuPipeline {
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
     }
 
-    private fun uploadFloatBuffer(ssboId: Int, data: FloatArray) {
+    private fun uploadFloatBuffer(ssboId: Int, offsetBytes: Int, data: FloatArray) {
         val buf = allocateFloatBuffer(data)
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, ssboId)
-        GLES31.glBufferSubData(GLES31.GL_SHADER_STORAGE_BUFFER, 0, data.size * 4, buf)
+        GLES31.glBufferSubData(
+            GLES31.GL_SHADER_STORAGE_BUFFER,
+            offsetBytes,
+            data.size * 4,
+            buf
+        )
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
     }
 
-    private fun readBackFloatBuffer(ssboId: Int, count: Int): FloatArray {
-        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, ssboId)
+    private fun readBackAnalysis(pixelCount: Int): Pass1Result {
+        GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, ssbos[ANALYSIS_BINDING])
         val mapped = GLES31.glMapBufferRange(
-            GLES31.GL_SHADER_STORAGE_BUFFER, 0, count * 4, GLES31.GL_MAP_READ_BIT
+            GLES31.GL_SHADER_STORAGE_BUFFER,
+            0,
+            pixelCount * 2 * 4,
+            GLES31.GL_MAP_READ_BIT
         ) as ByteBuffer
-        val result = FloatArray(count)
-        mapped.order(ByteOrder.nativeOrder()).asFloatBuffer().get(result)
+        val values = mapped.order(ByteOrder.nativeOrder()).asFloatBuffer()
+        val lValues = FloatArray(pixelCount)
+        val cRelValues = FloatArray(pixelCount)
+        for (index in 0 until pixelCount) {
+            lValues[index] = values[index * 2]
+            cRelValues[index] = values[index * 2 + 1]
+        }
         GLES31.glUnmapBuffer(GLES31.GL_SHADER_STORAGE_BUFFER)
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
-        return result
+        return Pass1Result(lValues, cRelValues)
     }
 
     private fun readBackIntBuffer(ssboId: Int, count: Int): IntArray {
@@ -452,6 +513,20 @@ class GpuPipeline {
         GLES31.glUnmapBuffer(GLES31.GL_SHADER_STORAGE_BUFFER)
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
         return result
+    }
+
+    private fun requireBlockSize(name: String, sizeBytes: Int) {
+        check(sizeBytes.toLong() <= maxShaderStorageBlockSize) {
+            "$name buffer requires $sizeBytes bytes, but the GPU supports " +
+                "$maxShaderStorageBlockSize bytes per shader-storage block"
+        }
+    }
+
+    private fun checkGlError(operation: String) {
+        val error = GLES31.glGetError()
+        check(error == GLES31.GL_NO_ERROR) {
+            "$operation failed with OpenGL error 0x${error.toString(16)}"
+        }
     }
 
     private fun allocateFloatBuffer(data: FloatArray): FloatBuffer {

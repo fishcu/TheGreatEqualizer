@@ -1,7 +1,7 @@
 #version 310 es
 // Pass 2: CDF transfer + reconstruct + zone weights + chroma offset + gamut clamp + sRGB output
 //
-// Input:  L[], a[], b[], C_rel[], hue[] from pass 1
+// Input:  interleaved (L, C_rel) pairs + hue from pass 1
 //         transferL[256], transferC[256] from CPU CDF fitting
 //         cdfValues[256] from CPU (output L histogram CDF)
 // Output: ARGB packed uint pixels
@@ -9,25 +9,25 @@
 // Steps covered: 6 (CDF match L), 7 (CDF match C), 8 (reconstruct ab),
 //                9 (zone weights), 10 (chroma offset), 11 (gamut clamp), 12 (OKLab→sRGB)
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 128) in;
 
-// Per-pixel data from pass 1
-layout(std430, binding = 0) readonly buffer InL    { float inL[];    };
-layout(std430, binding = 1) readonly buffer InCrel { float inCrel[]; };
-layout(std430, binding = 2) readonly buffer InHue  { float inHue[];  };
+// Binding layout stays within the four SSBOs guaranteed by GLES 3.1.
+// The pixel buffer is reused: pass 1 reads input pixels, pass 2 writes output.
+layout(std430, binding = 0) writeonly buffer PixelOutput {
+    uint outPixels[];
+};
 
-// Transfer LUTs from CPU fitting (256 entries each)
-layout(std430, binding = 3) readonly buffer TransferL { float transferL[]; };
-layout(std430, binding = 4) readonly buffer TransferC { float transferC[]; };
+layout(std430, binding = 1) readonly buffer AnalysisInput {
+    vec2 analysis[];  // x=L, y=C_rel
+};
 
-// Output CDF for zone weights (256 entries, normalized)
-layout(std430, binding = 5) readonly buffer CdfVals { float cdfValues[]; };
+layout(std430, binding = 2) readonly buffer HueInput {
+    float inHue[];
+};
 
-// Gamut LUT
-layout(std430, binding = 6) readonly buffer GamutLUT { float gamutLut[]; };
-
-// Output pixels
-layout(std430, binding = 7) writeonly buffer PixelOutput { uint outPixels[]; };
+layout(std430, binding = 3) readonly buffer LookupData {
+    float lookupData[];
+};
 
 uniform uint uPixelCount;
 uniform float uBlackL;
@@ -45,6 +45,10 @@ uniform float uHiStr;
 
 // ── Constants ──
 const int NUM_BINS = 256;
+const int GAMUT_SIZE = 256 * 360;
+const int TRANSFER_L_OFFSET = GAMUT_SIZE;
+const int TRANSFER_C_OFFSET = TRANSFER_L_OFFSET + NUM_BINS;
+const int CDF_OFFSET = TRANSFER_C_OFFSET + NUM_BINS;
 const float H_TO_IDX = 360.0 / (2.0 * 3.14159265358979);
 const int GAMUT_N_L = 256;
 const int GAMUT_N_H = 360;
@@ -72,7 +76,9 @@ float interpTransferL(float x) {
     float idxF = xc * float(NUM_BINS - 1);
     int lo = clamp(int(idxF), 0, NUM_BINS - 2);
     float t = idxF - float(lo);
-    return transferL[lo] + t * (transferL[lo + 1] - transferL[lo]);
+    float loValue = lookupData[TRANSFER_L_OFFSET + lo];
+    float hiValue = lookupData[TRANSFER_L_OFFSET + lo + 1];
+    return loValue + t * (hiValue - loValue);
 }
 
 float interpTransferC(float x) {
@@ -80,7 +86,9 @@ float interpTransferC(float x) {
     float idxF = xc * float(NUM_BINS - 1);
     int lo = clamp(int(idxF), 0, NUM_BINS - 2);
     float t = idxF - float(lo);
-    return transferC[lo] + t * (transferC[lo + 1] - transferC[lo]);
+    float loValue = lookupData[TRANSFER_C_OFFSET + lo];
+    float hiValue = lookupData[TRANSFER_C_OFFSET + lo + 1];
+    return loValue + t * (hiValue - loValue);
 }
 
 float interpCdf(float x) {
@@ -88,7 +96,9 @@ float interpCdf(float x) {
     float idxF = xc * float(NUM_BINS - 1);
     int lo = clamp(int(idxF), 0, NUM_BINS - 2);
     float t = idxF - float(lo);
-    return cdfValues[lo] + t * (cdfValues[lo + 1] - cdfValues[lo]);
+    float loValue = lookupData[CDF_OFFSET + lo];
+    float hiValue = lookupData[CDF_OFFSET + lo + 1];
+    return loValue + t * (hiValue - loValue);
 }
 
 // ── Gamut LUT bilinear lookup ──
@@ -111,10 +121,10 @@ float lookupGamutMax(float L_val, float h) {
     int row0 = li0 * GAMUT_N_H;
     int row1 = li1 * GAMUT_N_H;
 
-    return gamutLut[row0 + hi0] * oneMinusFl * oneMinusFh
-         + gamutLut[row0 + hi1] * oneMinusFl * fh
-         + gamutLut[row1 + hi0] * fl * oneMinusFh
-         + gamutLut[row1 + hi1] * fl * fh;
+    return lookupData[row0 + hi0] * oneMinusFl * oneMinusFh
+         + lookupData[row0 + hi1] * oneMinusFl * fh
+         + lookupData[row1 + hi0] * fl * oneMinusFh
+         + lookupData[row1 + hi1] * fl * fh;
 }
 
 // ── Smoothstep ──
@@ -132,8 +142,9 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uPixelCount) return;
 
-    float L = inL[idx];
-    float cRel = inCrel[idx];
+    vec2 analysisValues = analysis[idx];
+    float L = analysisValues.x;
+    float cRel = analysisValues.y;
     float hue = inHue[idx];
 
     // ── Step 6: CDF match L ──
