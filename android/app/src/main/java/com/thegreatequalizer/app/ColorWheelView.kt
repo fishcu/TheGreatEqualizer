@@ -274,7 +274,7 @@ class ColorWheelView @JvmOverloads constructor(
     @Suppress("DEPRECATION")
     private fun triggerHaptic() {
         performHapticFeedback(
-            HapticFeedbackConstants.CLOCK_TICK,
+            HapticFeedbackConstants.KEYBOARD_TAP,
             HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING or
                 HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING
         )
