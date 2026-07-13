@@ -301,14 +301,14 @@ class ColorFragment : Fragment() {
     /** Get fitted internal value for a slider */
     private fun getFittedValue(sliderId: Int): Float? {
         val main = activity as? MainActivity ?: return null
-        val fitted = main.pipelineState.fittedDefaultsC ?: return null
+        val fitted = main.pipelineState.fittedParams ?: return null
         return when (sliderId) {
-            R.id.slider_color_muted_colors -> fitted["t"]?.toFloat()
-            R.id.slider_color_vivid_colors -> fitted["s"]?.toFloat()
-            R.id.slider_color_saturation_balance -> fitted["c"]?.toFloat()
-            R.id.slider_color_vibrancy -> fitted["g"]?.toFloat()
-            R.id.slider_color_blacks -> fitted["x_lo"]?.toFloat()
-            R.id.slider_color_whites -> fitted["x_hi"]?.let { (it - 1.0).toFloat() }
+            R.id.slider_color_muted_colors -> fitted.colorMutedColors
+            R.id.slider_color_vivid_colors -> fitted.colorVividColors
+            R.id.slider_color_saturation_balance -> fitted.colorSaturationBalance
+            R.id.slider_color_vibrancy -> fitted.colorVibrancy
+            R.id.slider_color_blacks -> fitted.colorBlacks
+            R.id.slider_color_whites -> fitted.colorWhites
             else -> null
         }
     }

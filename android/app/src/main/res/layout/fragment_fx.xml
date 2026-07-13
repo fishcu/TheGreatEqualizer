@@ -18,6 +18,103 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginBottom="12dp"
+            android:text="@string/title_vignette"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/label_vignette_amount"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.thegreatequalizer.app.TickMarkSlider
+                android:id="@+id/slider_vignette_amount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:valueFrom="0.0"
+                android:valueTo="10.0"
+                app:labelBehavior="gone"
+                app:thumbColor="#03DAC5"
+                app:trackColorActive="#03DAC5"
+                app:trackColorInactive="#444444" />
+
+            <TextView
+                android:id="@+id/value_vignette_amount"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:gravity="end"
+                android:minWidth="48dp"
+                android:text="0.00"
+                android:textColor="#BBBBBB"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            android:background="#333333" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/label_vignette_falloff"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <com.thegreatequalizer.app.TickMarkSlider
+                android:id="@+id/slider_vignette_falloff"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:valueFrom="1.0"
+                android:valueTo="10.0"
+                app:labelBehavior="gone"
+                app:thumbColor="#03DAC5"
+                app:trackColorActive="#03DAC5"
+                app:trackColorInactive="#444444" />
+
+            <TextView
+                android:id="@+id/value_vignette_falloff"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:gravity="end"
+                android:minWidth="48dp"
+                android:text="5.00"
+                android:textColor="#BBBBBB"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp"
+            android:background="#555555" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
             android:text="@string/title_grain"
             android:textColor="#FFFFFF"
             android:textSize="18sp"
@@ -42,7 +139,7 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:valueFrom="0.0"
-                android:valueTo="0.15"
+                android:valueTo="0.38729835"
                 app:labelBehavior="gone"
                 app:thumbColor="#03DAC5"
                 app:trackColorActive="#03DAC5"

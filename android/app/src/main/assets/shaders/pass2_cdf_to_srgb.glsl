@@ -50,6 +50,8 @@ uniform highp sampler2D uGrainSecondary;
 uniform float uGrainAmount;
 uniform float uGrainSize;
 uniform vec2 uGrainPatternOffset;
+uniform vec2 uGrainCoordinateScale;
+uniform float uGrainLod;
 uniform int uImageWidth;
 uniform ivec2 uImageOrigin;
 
@@ -66,12 +68,20 @@ const float ZONE_BOUNDARY_LO = 1.0 / 3.0;
 const float ZONE_BOUNDARY_HI = 2.0 / 3.0;
 const float ZONE_HALF_W = 1.0 / 4.0;
 const float GRAIN_REFERENCE_SIZE = 1.25;
-const float GRAIN_PRIMARY_SIZE = 512.0;
-const float GRAIN_SECONDARY_SIZE = 509.0;
+const float GRAIN_PRIMARY_SIZE = 2048.0;
+const float GRAIN_SECONDARY_SIZE = 2039.0;
 const float GRAIN_TEXTURE_RANGE = 4.0;
 const float GRAIN_SECONDARY_OFFSET = 137.0;
 const float GRAIN_INV_SQRT_2 = 0.70710678118655;
 const float GRAIN_EDGE_STRENGTH = 0.15;
+const mat2 GRAIN_PRIMARY_ROTATION = mat2(
+     0.9563048,  0.2923717,
+    -0.2923717,  0.9563048
+);
+const mat2 GRAIN_SECONDARY_ROTATION = mat2(
+     0.8571673, -0.5150381,
+     0.5150381,  0.8571673
+);
 
 // ── M2 inverse: OKLab → cube-root LMS ──
 const mat3 M2_INV = mat3(
@@ -157,11 +167,12 @@ float srgb_oetf(float v) {
 
 float sampleGrain(vec2 globalPixel) {
     float coordinateScale = GRAIN_REFERENCE_SIZE / uGrainSize;
+    vec2 primaryPixel = GRAIN_PRIMARY_ROTATION * globalPixel;
     vec2 primaryUv =
         (
-            globalPixel * coordinateScale + uGrainPatternOffset
+            primaryPixel * coordinateScale + uGrainPatternOffset
         ) / GRAIN_PRIMARY_SIZE;
-    vec2 secondaryPixel = vec2(-globalPixel.y, globalPixel.x)
+    vec2 secondaryPixel = GRAIN_SECONDARY_ROTATION * globalPixel
         + vec2(GRAIN_SECONDARY_OFFSET);
     vec2 secondaryUv =
         (
@@ -169,10 +180,10 @@ float sampleGrain(vec2 globalPixel) {
             + vec2(uGrainPatternOffset.y, -uGrainPatternOffset.x)
         ) / GRAIN_SECONDARY_SIZE;
     float primary = (
-        textureLod(uGrainPrimary, primaryUv, 0.0).r * 2.0 - 1.0
+        textureLod(uGrainPrimary, primaryUv, uGrainLod).r * 2.0 - 1.0
     ) * GRAIN_TEXTURE_RANGE;
     float secondary = (
-        textureLod(uGrainSecondary, secondaryUv, 0.0).r * 2.0 - 1.0
+        textureLod(uGrainSecondary, secondaryUv, uGrainLod).r * 2.0 - 1.0
     ) * GRAIN_TEXTURE_RANGE;
     return (primary + secondary) * GRAIN_INV_SQRT_2;
 }
@@ -228,9 +239,9 @@ void main() {
     if (uGrainAmount > 0.0) {
         int localX = int(idx % uint(uImageWidth));
         int localY = int(idx / uint(uImageWidth));
-        vec2 globalPixel = vec2(
-            uImageOrigin + ivec2(localX, localY)
-        ) + vec2(0.5);
+        vec2 localPixel = vec2(localX, localY) + vec2(0.5);
+        vec2 globalPixel =
+            vec2(uImageOrigin) + localPixel * uGrainCoordinateScale;
         float midtoneWeight = clamp(4.0 * lOut * (1.0 - lOut), 0.0, 1.0);
         float envelope = GRAIN_EDGE_STRENGTH
             + (1.0 - GRAIN_EDGE_STRENGTH) * midtoneWeight;

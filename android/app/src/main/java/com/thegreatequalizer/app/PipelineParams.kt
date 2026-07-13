@@ -27,7 +27,11 @@ data class PipelineParams(
     val highlightTintAngle: Float = 0.0f,
     val highlightTintStrength: Float = 0.0f,
 
-    // Grain tab
+    // Vignette
+    val vignetteAmount: Float = 0.0f,         // attenuation in exposure stops
+    val vignetteFalloff: Float = 5.0f,        // exponent of normalized radius
+
+    // Grain effect
     val grainAmount: Float = 0.0f,           // OKLab L standard deviation at midtones
     val grainSize: Float = 1.25f             // apparent grain diameter in output pixels
 )

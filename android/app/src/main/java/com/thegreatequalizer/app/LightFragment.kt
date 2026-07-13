@@ -319,14 +319,14 @@ class LightFragment : Fragment() {
     /** Get fitted internal value for a slider */
     private fun getFittedValue(sliderId: Int): Float? {
         val main = activity as? MainActivity ?: return null
-        val fitted = main.pipelineState.fittedDefaultsL ?: return null
+        val fitted = main.pipelineState.fittedParams ?: return null
         return when (sliderId) {
-            R.id.slider_light_shadows -> fitted["t"]?.toFloat()
-            R.id.slider_light_highlights -> fitted["s"]?.toFloat()
-            R.id.slider_light_midtone_balance -> fitted["c"]?.toFloat()
-            R.id.slider_light_midtone_contrast -> fitted["g"]?.toFloat()
-            R.id.slider_light_blacks -> fitted["x_lo"]?.toFloat()
-            R.id.slider_light_whites -> fitted["x_hi"]?.let { (it - 1.0).toFloat() }
+            R.id.slider_light_shadows -> fitted.lightShadows
+            R.id.slider_light_highlights -> fitted.lightHighlights
+            R.id.slider_light_midtone_balance -> fitted.lightMidtoneBalance
+            R.id.slider_light_midtone_contrast -> fitted.lightMidtoneContrast
+            R.id.slider_light_blacks -> fitted.lightBlacks
+            R.id.slider_light_whites -> fitted.lightWhites
             else -> null
         }
     }

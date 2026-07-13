@@ -7,20 +7,23 @@ class PipelineState {
     var originalBitmap: Bitmap? = null
     var processedBitmap: Bitmap? = null
 
-    // Pass 1 outputs (only recomputed when image changes)
+    // Active pass 1 outputs, rebuilt when the vignette changes.
     var pass1L: FloatArray? = null
     var pass1CRel: FloatArray? = null
     var width: Int = 0
     var height: Int = 0
+    var fullWidth: Int = 0
+    var fullHeight: Int = 0
     var pixelCount: Int = 0
+    var vignetteAmount: Float = 0.0f
+    var vignetteFalloff: Float = 5.0f
 
-    // Raw histograms (only recomputed when image changes)
+    // Immutable pre-vignette histograms used for fitting and equalization.
     var rawHistL: DoubleArray? = null
     var rawHistC: DoubleArray? = null
 
-    // Fitted defaults from auto-fit (stored so "Fit to Input" can restore them)
-    var fittedDefaultsL: Map<String, Double>? = null
-    var fittedDefaultsC: Map<String, Double>? = null
+    // Stable per-image baseline used as the center of randomization.
+    var fittedParams: PipelineParams? = null
 
     fun isImageLoaded(): Boolean = pass1L != null
 }

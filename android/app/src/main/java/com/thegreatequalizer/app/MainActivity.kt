@@ -209,7 +209,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_light -> LightFragment()
                 R.id.nav_color -> ColorFragment()
                 R.id.nav_zoned_tint -> ZonedTintFragment()
-                R.id.nav_fx -> GrainFragment()
+                R.id.nav_fx -> FxFragment()
                 else -> return@setOnItemSelectedListener false
             }
             supportFragmentManager.beginTransaction()
@@ -377,16 +377,17 @@ class MainActivity : AppCompatActivity() {
         val generation = imageGeneration
         val lut = gamutLut
         val gpu = gpuPipeline
+        val initialParams = pipelineParams
         imageProcessingJob?.cancel()
         imageProcessingJob = lifecycleScope.launch {
             val startMs = System.currentTimeMillis()
             try {
                 val state = withContext(gpuDispatcher) {
-                    ImagePipeline.processPass1Only(src, lut, gpu)
+                    ImagePipeline.processPass1Only(src, lut, gpu, initialParams)
                 }
                 if (generation != imageGeneration) return@launch
 
-                var params = PipelineParams()
+                var params = initialParams
                 params = withContext(Dispatchers.Default) {
                     ImagePipeline.fitToInput(state, params, "light")
                 }
@@ -394,6 +395,7 @@ class MainActivity : AppCompatActivity() {
                     ImagePipeline.fitToInput(state, params, "color")
                 }
                 if (generation != imageGeneration) return@launch
+                state.fittedParams = params
 
                 val outBitmap = withContext(gpuDispatcher) {
                     ImagePipeline.processFromParams(state, params, lut, gpu)
@@ -429,7 +431,7 @@ class MainActivity : AppCompatActivity() {
             is LightFragment -> currentFragment.updateFromParams()
             is ColorFragment -> currentFragment.updateFromParams()
             is ZonedTintFragment -> currentFragment.updateFromParams()
-            is GrainFragment -> currentFragment.updateFromParams()
+            is FxFragment -> currentFragment.updateFromParams()
         }
     }
 
@@ -437,33 +439,32 @@ class MainActivity : AppCompatActivity() {
         if (!pipelineState.isImageLoaded()) return
         val rng = java.util.Random()
         val defaults = PipelineParams()
+        val fitted = pipelineState.fittedParams ?: return
         val pi = Math.PI.toFloat()
         val twoPi = (2.0 * Math.PI).toFloat()
 
         fun gaussian(center: Float, sd: Float, min: Float, max: Float): Float =
             (center + rng.nextGaussian().toFloat() * sd).coerceIn(min, max)
 
-        fun angleParam(default: Float): Float =
-            gaussian(default, 0.15f * (pi / 2), 0f, pi / 2)
+        fun angleParam(center: Float): Float =
+            gaussian(center, 0.15f * (pi / 2), 0f, pi / 2)
 
-        val newParams = defaults.copy(
-            // Light tab — keep smoothing at default
-            lightStrength = defaults.lightStrength,
-            lightShadows = angleParam(defaults.lightShadows),
-            lightHighlights = angleParam(defaults.lightHighlights),
-            lightMidtoneBalance = gaussian(defaults.lightMidtoneBalance, 0.15f, 0f, 1f),
-            lightMidtoneContrast = angleParam(defaults.lightMidtoneContrast),
-            lightBlacks = gaussian(defaults.lightBlacks, 0.15f, -1f, 1f),
-            lightWhites = gaussian(defaults.lightWhites, 0.15f, -1f, 1f),
+        val newParams = fitted.copy(
+            // Light tab — randomize around the per-image fit
+            lightShadows = angleParam(fitted.lightShadows),
+            lightHighlights = angleParam(fitted.lightHighlights),
+            lightMidtoneBalance = gaussian(fitted.lightMidtoneBalance, 0.15f, 0f, 1f),
+            lightMidtoneContrast = angleParam(fitted.lightMidtoneContrast),
+            lightBlacks = gaussian(fitted.lightBlacks, 0.15f, -1f, 1f),
+            lightWhites = gaussian(fitted.lightWhites, 0.15f, -1f, 1f),
 
-            // Color tab — keep smoothing at default
-            colorStrength = defaults.colorStrength,
-            colorMutedColors = angleParam(defaults.colorMutedColors),
-            colorVividColors = angleParam(defaults.colorVividColors),
-            colorSaturationBalance = gaussian(defaults.colorSaturationBalance, 0.15f, 0f, 1f),
-            colorVibrancy = angleParam(defaults.colorVibrancy),
-            colorBlacks = gaussian(defaults.colorBlacks, 0.15f, -1f, 1f),
-            colorWhites = gaussian(defaults.colorWhites, 0.15f, -1f, 1f),
+            // Color tab — randomize around the per-image fit
+            colorMutedColors = angleParam(fitted.colorMutedColors),
+            colorVividColors = angleParam(fitted.colorVividColors),
+            colorSaturationBalance = gaussian(fitted.colorSaturationBalance, 0.15f, 0f, 1f),
+            colorVibrancy = angleParam(fitted.colorVibrancy),
+            colorBlacks = gaussian(fitted.colorBlacks, 0.15f, -1f, 1f),
+            colorWhites = gaussian(fitted.colorWhites, 0.15f, -1f, 1f),
 
             // Zoned Tint — uniform angle, subtle strength
             shadowTintAngle = Random.nextFloat() * twoPi,
@@ -472,6 +473,10 @@ class MainActivity : AppCompatActivity() {
             midtoneTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
             highlightTintAngle = Random.nextFloat() * twoPi,
             highlightTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
+
+            // Vignette — exposure attenuation with varied radial falloff
+            vignetteAmount = abs(rng.nextGaussian().toFloat() * 0.75f).coerceIn(0f, 10f),
+            vignetteFalloff = gaussian(defaults.vignetteFalloff, 1.5f, 1f, 10f),
 
             // Grain — half-normal amount and log-normal apparent size
             grainAmount = abs(rng.nextGaussian().toFloat() * 0.04f).coerceIn(0f, 0.15f),
@@ -650,6 +655,20 @@ class MainActivity : AppCompatActivity() {
         imageView.setTransformMatrix(savedMatrix)
     }
 
+    private fun previewVignetteRenderParams(
+        state: PipelineState,
+        params: PipelineParams
+    ): GpuPipeline.VignetteRenderParams =
+        GpuPipeline.VignetteRenderParams(
+            amount = params.vignetteAmount,
+            falloff = params.vignetteFalloff,
+            rowWidth = state.width,
+            originX = 0,
+            originY = 0,
+            fullImageWidth = state.width,
+            fullImageHeight = state.height
+        )
+
     // ---------------------------------------------------------------
     // Hi-res crop overlay (second rendering track)
     // ---------------------------------------------------------------
@@ -761,7 +780,11 @@ class MainActivity : AppCompatActivity() {
                         previewPixels, 0, state.width,
                         0, 0, state.width, state.height
                     )
-                    gpu.processPass1(previewPixels, state.pixelCount)
+                    gpu.processPass1(
+                        previewPixels,
+                        state.pixelCount,
+                        previewVignetteRenderParams(state, params)
+                    )
                     result
                 }
 
@@ -853,7 +876,11 @@ class MainActivity : AppCompatActivity() {
                         previewPixels, 0, state.width,
                         0, 0, state.width, state.height
                     )
-                    gpu.processPass1(previewPixels, state.pixelCount)
+                    gpu.processPass1(
+                        previewPixels,
+                        state.pixelCount,
+                        previewVignetteRenderParams(state, params)
+                    )
                 }
                 progressBar.progress = 90
 

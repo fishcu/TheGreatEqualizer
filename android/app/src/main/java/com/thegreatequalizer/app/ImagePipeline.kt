@@ -34,6 +34,40 @@ object ImagePipeline {
      */
     const val MAX_PROCESSING_EDGE = 1024
 
+    private fun vignetteRenderParams(
+        params: PipelineParams,
+        rowWidth: Int,
+        originX: Int,
+        originY: Int,
+        fullImageWidth: Int,
+        fullImageHeight: Int
+    ): GpuPipeline.VignetteRenderParams =
+        GpuPipeline.VignetteRenderParams(
+            amount = params.vignetteAmount,
+            falloff = params.vignetteFalloff,
+            rowWidth = rowWidth,
+            originX = originX,
+            originY = originY,
+            fullImageWidth = fullImageWidth,
+            fullImageHeight = fullImageHeight
+        )
+
+    private fun sourceAnalysisRenderParams(
+        falloff: Float,
+        rowWidth: Int,
+        fullImageWidth: Int,
+        fullImageHeight: Int
+    ): GpuPipeline.VignetteRenderParams =
+        GpuPipeline.VignetteRenderParams(
+            amount = 0.0f,
+            falloff = falloff,
+            rowWidth = rowWidth,
+            originX = 0,
+            originY = 0,
+            fullImageWidth = fullImageWidth,
+            fullImageHeight = fullImageHeight
+        )
+
     /**
      * Downscale a bitmap so its longer edge is at most [maxEdge] pixels.
      * Returns the original bitmap if it's already small enough.
@@ -320,7 +354,18 @@ object ImagePipeline {
 
         // Steps 1-4 (GPU pass 1): sRGB EOTF, RGB→OKLab, relative chroma
         tStep = System.nanoTime()
-        val pass1 = gpuPipeline.processPass1(pixels, pixelCount)
+        val pass1 = gpuPipeline.processPass1(
+            pixels,
+            pixelCount,
+            vignetteRenderParams(
+                PipelineParams(),
+                width,
+                0,
+                0,
+                width,
+                height
+            )
+        )
         mark("Steps 1-4 GPU pass1", tStep)
 
         val L = pass1.L
@@ -409,7 +454,9 @@ object ImagePipeline {
                 size = 1.25f,
                 rowWidth = width,
                 originX = 0,
-                originY = 0
+                originY = 0,
+                coordinateScaleX = 1.0f,
+                coordinateScaleY = 1.0f
             ),
             pixelCount
         )
@@ -437,11 +484,14 @@ object ImagePipeline {
     fun processPass1Only(
         input: Bitmap,
         gamutLut: FloatArray,
-        gpuPipeline: GpuPipeline
+        gpuPipeline: GpuPipeline,
+        params: PipelineParams
     ): PipelineState {
         val state = PipelineState()
 
         val scaled = downscaleIfNeeded(input)
+        state.fullWidth = input.width
+        state.fullHeight = input.height
         state.originalBitmap = scaled
         state.width = scaled.width
         state.height = scaled.height
@@ -451,8 +501,18 @@ object ImagePipeline {
         val pixels = IntArray(state.pixelCount)
         scaled.getPixels(pixels, 0, state.width, 0, 0, state.width, state.height)
 
-        // GPU pass 1: sRGB EOTF → OKLab → relative chroma
-        val pass1 = gpuPipeline.processPass1(pixels, state.pixelCount)
+        // Analyze the source without FX. These histograms define "input" for
+        // fitting and equalization even when vignette changes the rendered pixels.
+        val pass1 = gpuPipeline.processPass1(
+            pixels,
+            state.pixelCount,
+            sourceAnalysisRenderParams(
+                params.vignetteFalloff,
+                state.width,
+                state.width,
+                state.height
+            )
+        )
         val L = pass1.L
         val cRel = pass1.cRel
 
@@ -461,21 +521,69 @@ object ImagePipeline {
 
         state.pass1L = L
         state.pass1CRel = cRel
+        state.vignetteAmount = 0.0f
+        state.vignetteFalloff = params.vignetteFalloff
 
-        // Raw histograms
+        // Immutable pre-vignette reference histograms.
         state.rawHistL = computeHistogram(L)
         state.rawHistC = computeHistogram(cRel)
 
-        // Auto-fit both channels (cap = max, i.e. strength=1.0)
-        val capL = state.rawHistL!!.maxOrNull() ?: 0.0
-        val cappedHistL = capHistogram(state.rawHistL!!, capL)
-        state.fittedDefaultsL = FitParams.fitInitialParams(cappedHistL)
-
-        val capC = state.rawHistC!!.maxOrNull() ?: 0.0
-        val cappedHistC = capHistogram(state.rawHistC!!, capC)
-        state.fittedDefaultsC = FitParams.fitInitialParams(cappedHistC)
-
         return state
+    }
+
+    private fun rebuildVignetteAnalysis(
+        state: PipelineState,
+        params: PipelineParams,
+        gpuPipeline: GpuPipeline
+    ) {
+        if (
+            state.vignetteAmount == params.vignetteAmount &&
+            state.vignetteFalloff == params.vignetteFalloff
+        ) return
+
+        val totalStart = System.nanoTime()
+        val preview = state.originalBitmap!!
+        val pixels = IntArray(state.pixelCount)
+        preview.getPixels(
+            pixels,
+            0,
+            state.width,
+            0,
+            0,
+            state.width,
+            state.height
+        )
+
+        val pass1Start = System.nanoTime()
+        val pass1 = gpuPipeline.processPass1(
+            pixels,
+            state.pixelCount,
+            vignetteRenderParams(
+                params,
+                state.width,
+                0,
+                0,
+                state.width,
+                state.height
+            )
+        )
+        val pass1Ms = (System.nanoTime() - pass1Start) / 1_000_000
+
+        val cacheStart = System.nanoTime()
+        for (index in pass1.L.indices) {
+            pass1.L[index] = pass1.L[index].coerceIn(0.0f, 1.0f)
+        }
+        state.pass1L = pass1.L
+        state.pass1CRel = pass1.cRel
+        state.vignetteAmount = params.vignetteAmount
+        state.vignetteFalloff = params.vignetteFalloff
+        val cacheMs = (System.nanoTime() - cacheStart) / 1_000_000
+        val totalMs = (System.nanoTime() - totalStart) / 1_000_000
+        Log.i(
+            TAG,
+            "[Vignette] analysis rebuilt: pass1+readback=${pass1Ms}ms, " +
+                "cache=${cacheMs}ms, total=${totalMs}ms"
+        )
     }
 
     // ---------------------------------------------------------------
@@ -492,6 +600,7 @@ object ImagePipeline {
         gamutLut: FloatArray,
         gpuPipeline: GpuPipeline
     ): Bitmap {
+        rebuildVignetteAnalysis(state, params, gpuPipeline)
         val L = state.pass1L!!
         val pixelCount = state.pixelCount
         val width = state.width
@@ -564,7 +673,11 @@ object ImagePipeline {
                 size = params.grainSize,
                 rowWidth = width,
                 originX = 0,
-                originY = 0
+                originY = 0,
+                coordinateScaleX =
+                    state.fullWidth.toFloat() / state.width.toFloat(),
+                coordinateScaleY =
+                    state.fullHeight.toFloat() / state.height.toFloat()
             ),
             pixelCount
         )
@@ -685,7 +798,18 @@ object ImagePipeline {
                 originalBitmap.getPixels(tilePixels, 0, tileW, x0, y0, tileW, tileH)
 
                 // Pass 1: populate OKLab SSBOs (no readback needed)
-                gpuPipeline.processPass1NoReadback(tilePixels, tilePixelCount)
+                gpuPipeline.processPass1NoReadback(
+                    tilePixels,
+                    tilePixelCount,
+                    vignetteRenderParams(
+                        params,
+                        tileW,
+                        x0,
+                        y0,
+                        width,
+                        height
+                    )
+                )
 
                 // Pass 2: apply transfer LUTs, output ARGB
                 val outPixels = gpuPipeline.processPass2(
@@ -698,7 +822,9 @@ object ImagePipeline {
                         size = params.grainSize,
                         rowWidth = tileW,
                         originX = x0,
-                        originY = y0
+                        originY = y0,
+                        coordinateScaleX = 1.0f,
+                        coordinateScaleY = 1.0f
                     ),
                     tilePixelCount
                 )
@@ -816,7 +942,18 @@ object ImagePipeline {
         originalBitmap.getPixels(cropPixels, 0, cropW, cropX, cropY, cropW, cropH)
 
         // --- GPU pass 1 (no readback) + pass 2 ---
-        gpuPipeline.processPass1NoReadback(cropPixels, pixelCount)
+        gpuPipeline.processPass1NoReadback(
+            cropPixels,
+            pixelCount,
+            vignetteRenderParams(
+                params,
+                cropW,
+                cropX,
+                cropY,
+                originalBitmap.width,
+                originalBitmap.height
+            )
+        )
 
         val outPixels = gpuPipeline.processPass2(
             transferL, transferC, cdfValuesFloat,
@@ -828,7 +965,9 @@ object ImagePipeline {
                 size = params.grainSize,
                 rowWidth = cropW,
                 originX = cropX,
-                originY = cropY
+                originY = cropY,
+                coordinateScaleX = 1.0f,
+                coordinateScaleY = 1.0f
             ),
             pixelCount
         )

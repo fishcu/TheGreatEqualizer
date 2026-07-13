@@ -7,6 +7,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
+import kotlin.math.log2
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
@@ -33,11 +36,13 @@ class GpuPipeline {
         private const val TRANSFER_C_OFFSET = TRANSFER_L_OFFSET + NUM_BINS
         private const val CDF_OFFSET = TRANSFER_C_OFFSET + NUM_BINS
         private const val LOOKUP_FLOAT_COUNT = CDF_OFFSET + NUM_BINS
-        private const val GRAIN_PRIMARY_SIZE = 512
-        private const val GRAIN_SECONDARY_SIZE = 509
+        private const val GRAIN_PRIMARY_SIZE = 2048
+        private const val GRAIN_SECONDARY_SIZE = 2039
+        private const val GRAIN_GENERATOR_WORKGROUP_SIZE = 8
         private const val GRAIN_PRIMARY_TEXTURE_UNIT = 0
         private const val GRAIN_SECONDARY_TEXTURE_UNIT = 1
         private const val REQUIRED_COMPUTE_TEXTURE_UNITS = 2
+        private const val REQUIRED_COMPUTE_IMAGE_UNIFORMS = 1
         private const val GRAIN_REFERENCE_SIZE = 1.25f
         private const val GRAIN_OFFSET_Y_SALT = 0x9e3779b9u
         private const val PIXEL_BINDING = 0
@@ -52,11 +57,17 @@ class GpuPipeline {
     private var eglSurface: EGLSurface? = null
 
     // Compute shader programs
+    private var grainGeneratorProgram = 0
     private var pass1Program = 0
     private var pass2Program = 0
 
     // Pass 1 uniform locations
     private var pass1PixelCountLoc = 0
+    private var pass1VignetteAmountLoc = 0
+    private var pass1VignetteFalloffLoc = 0
+    private var pass1ImageWidthLoc = 0
+    private var pass1ImageOriginLoc = 0
+    private var pass1FullImageSizeLoc = 0
 
     // Pass 2 uniform locations
     private var pass2PixelCountLoc = 0
@@ -75,6 +86,8 @@ class GpuPipeline {
     private var pass2GrainAmountLoc = 0
     private var pass2GrainSizeLoc = 0
     private var pass2GrainPatternOffsetLoc = 0
+    private var pass2GrainCoordinateScaleLoc = 0
+    private var pass2GrainLodLoc = 0
     private var pass2ImageWidthLoc = 0
     private var pass2ImageOriginLoc = 0
 
@@ -93,12 +106,24 @@ class GpuPipeline {
         val cRel: FloatArray
     )
 
+    data class VignetteRenderParams(
+        val amount: Float,
+        val falloff: Float,
+        val rowWidth: Int,
+        val originX: Int,
+        val originY: Int,
+        val fullImageWidth: Int,
+        val fullImageHeight: Int
+    )
+
     data class GrainRenderParams(
         val amount: Float,
         val size: Float,
         val rowWidth: Int,
         val originX: Int,
-        val originY: Int
+        val originY: Int,
+        val coordinateScaleX: Float,
+        val coordinateScaleY: Float
     )
 
     /**
@@ -114,10 +139,20 @@ class GpuPipeline {
         try {
             initEgl()
             validateCapabilities()
+            grainGeneratorProgram =
+                loadComputeShader(context, "shaders/generate_grain.glsl")
             pass1Program = loadComputeShader(context, "shaders/pass1_rgb_to_oklab.glsl")
             pass2Program = loadComputeShader(context, "shaders/pass2_cdf_to_srgb.glsl")
 
             pass1PixelCountLoc = GLES31.glGetUniformLocation(pass1Program, "uPixelCount")
+            pass1VignetteAmountLoc =
+                GLES31.glGetUniformLocation(pass1Program, "uVignetteAmount")
+            pass1VignetteFalloffLoc =
+                GLES31.glGetUniformLocation(pass1Program, "uVignetteFalloff")
+            pass1ImageWidthLoc = GLES31.glGetUniformLocation(pass1Program, "uImageWidth")
+            pass1ImageOriginLoc = GLES31.glGetUniformLocation(pass1Program, "uImageOrigin")
+            pass1FullImageSizeLoc =
+                GLES31.glGetUniformLocation(pass1Program, "uFullImageSize")
 
             pass2PixelCountLoc = GLES31.glGetUniformLocation(pass2Program, "uPixelCount")
             pass2BlackLLoc = GLES31.glGetUniformLocation(pass2Program, "uBlackL")
@@ -136,6 +171,9 @@ class GpuPipeline {
             pass2GrainSizeLoc = GLES31.glGetUniformLocation(pass2Program, "uGrainSize")
             pass2GrainPatternOffsetLoc =
                 GLES31.glGetUniformLocation(pass2Program, "uGrainPatternOffset")
+            pass2GrainCoordinateScaleLoc =
+                GLES31.glGetUniformLocation(pass2Program, "uGrainCoordinateScale")
+            pass2GrainLodLoc = GLES31.glGetUniformLocation(pass2Program, "uGrainLod")
             pass2ImageWidthLoc = GLES31.glGetUniformLocation(pass2Program, "uImageWidth")
             pass2ImageOriginLoc = GLES31.glGetUniformLocation(pass2Program, "uImageOrigin")
 
@@ -144,19 +182,19 @@ class GpuPipeline {
             uploadFloatBuffer(ssbos[LOOKUP_BINDING], 0, gamutLut)
 
             GLES31.glGenTextures(grainTextures.size, grainTextures, 0)
-            uploadGrainTexture(
-                context,
-                grainTextures[GRAIN_PRIMARY_TEXTURE_UNIT],
-                "grain/grain_primary_r8.bin",
-                GRAIN_PRIMARY_SIZE
+            val grainStart = System.nanoTime()
+            generateGrainTextures()
+            GLES31.glFinish()
+            val grainMs = (System.nanoTime() - grainStart) / 1_000_000
+            Log.i(
+                TAG,
+                "Procedural grain textures generated: " +
+                    "${GRAIN_PRIMARY_SIZE}x$GRAIN_PRIMARY_SIZE + " +
+                    "${GRAIN_SECONDARY_SIZE}x$GRAIN_SECONDARY_SIZE in ${grainMs}ms"
             )
-            uploadGrainTexture(
-                context,
-                grainTextures[GRAIN_SECONDARY_TEXTURE_UNIT],
-                "grain/grain_secondary_r8.bin",
-                GRAIN_SECONDARY_SIZE
-            )
-            checkGlError("lookup buffer initialization")
+            GLES31.glDeleteProgram(grainGeneratorProgram)
+            grainGeneratorProgram = 0
+            checkGlError("pipeline initialization")
 
             initialized = true
             Log.i(TAG, "GPU pipeline initialized")
@@ -198,7 +236,11 @@ class GpuPipeline {
      * Run pass 1: ARGB pixels → OKLab decomposition.
      * Returns L and C_rel arrays for CPU histogram computation.
      */
-    fun processPass1(pixels: IntArray, pixelCount: Int): Pass1Result {
+    fun processPass1(
+        pixels: IntArray,
+        pixelCount: Int,
+        vignetteParams: VignetteRenderParams
+    ): Pass1Result {
         check(initialized) { "GpuPipeline not initialized" }
         ensureBuffers(pixelCount)
 
@@ -214,7 +256,7 @@ class GpuPipeline {
         }
 
         GLES31.glUseProgram(pass1Program)
-        GLES30.glUniform1ui(pass1PixelCountLoc, pixelCount)
+        configurePass1Uniforms(pixelCount, vignetteParams)
         GLES31.glDispatchCompute(numGroups, 1, 1)
         GLES31.glMemoryBarrier(
             GLES31.GL_SHADER_STORAGE_BARRIER_BIT or GLES31.GL_BUFFER_UPDATE_BARRIER_BIT
@@ -229,7 +271,11 @@ class GpuPipeline {
      * OKLab SSBOs remain populated for a subsequent pass 2 dispatch.
      * Used by tiled full-res export to avoid unnecessary readback overhead.
      */
-    fun processPass1NoReadback(pixels: IntArray, pixelCount: Int) {
+    fun processPass1NoReadback(
+        pixels: IntArray,
+        pixelCount: Int,
+        vignetteParams: VignetteRenderParams
+    ) {
         check(initialized) { "GpuPipeline not initialized" }
         ensureBuffers(pixelCount)
 
@@ -245,10 +291,46 @@ class GpuPipeline {
         }
 
         GLES31.glUseProgram(pass1Program)
-        GLES30.glUniform1ui(pass1PixelCountLoc, pixelCount)
+        configurePass1Uniforms(pixelCount, vignetteParams)
         GLES31.glDispatchCompute(numGroups, 1, 1)
         GLES31.glMemoryBarrier(GLES31.GL_SHADER_STORAGE_BARRIER_BIT)
         checkGlError("pass 1 dispatch")
+    }
+
+    private fun configurePass1Uniforms(
+        pixelCount: Int,
+        params: VignetteRenderParams
+    ) {
+        require(params.amount in 0.0f..10.0f) {
+            "Vignette amount must be in [0.0, 10.0]"
+        }
+        require(params.falloff in 1.0f..10.0f) {
+            "Vignette falloff must be in [1.0, 10.0]"
+        }
+        require(params.rowWidth > 0 && pixelCount % params.rowWidth == 0) {
+            "Pixel count must contain complete rows"
+        }
+        require(params.originX >= 0 && params.originY >= 0) {
+            "Vignette origin must be non-negative"
+        }
+        val rowCount = pixelCount / params.rowWidth
+        require(
+            params.originX + params.rowWidth <= params.fullImageWidth &&
+                params.originY + rowCount <= params.fullImageHeight
+        ) {
+            "Vignette region must lie inside the full image"
+        }
+
+        GLES30.glUniform1ui(pass1PixelCountLoc, pixelCount)
+        GLES20.glUniform1f(pass1VignetteAmountLoc, params.amount)
+        GLES20.glUniform1f(pass1VignetteFalloffLoc, params.falloff)
+        GLES20.glUniform1i(pass1ImageWidthLoc, params.rowWidth)
+        GLES20.glUniform2i(pass1ImageOriginLoc, params.originX, params.originY)
+        GLES20.glUniform2i(
+            pass1FullImageSizeLoc,
+            params.fullImageWidth,
+            params.fullImageHeight
+        )
     }
 
     /**
@@ -278,6 +360,12 @@ class GpuPipeline {
         }
         require(grainParams.originX >= 0 && grainParams.originY >= 0) {
             "Grain origin must be non-negative"
+        }
+        require(
+            grainParams.coordinateScaleX >= 1.0f &&
+                grainParams.coordinateScaleY >= 1.0f
+        ) {
+            "Grain coordinate scales must be at least one"
         }
 
         val numGroups = (pixelCount + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE
@@ -311,6 +399,23 @@ class GpuPipeline {
             pass2GrainPatternOffsetLoc,
             grainOffset(sizeBits),
             grainOffset(sizeBits xor GRAIN_OFFSET_Y_SALT)
+        )
+        GLES20.glUniform2f(
+            pass2GrainCoordinateScaleLoc,
+            grainParams.coordinateScaleX,
+            grainParams.coordinateScaleY
+        )
+        val previewScale = max(
+            grainParams.coordinateScaleX,
+            grainParams.coordinateScaleY
+        )
+        val correlatedFootprint = previewScale * min(
+            1.0f,
+            GRAIN_REFERENCE_SIZE / grainParams.size
+        )
+        GLES20.glUniform1f(
+            pass2GrainLodLoc,
+            max(0.0f, log2(correlatedFootprint))
         )
         GLES20.glUniform1i(pass2ImageWidthLoc, grainParams.rowWidth)
         GLES20.glUniform2i(
@@ -354,6 +459,10 @@ class GpuPipeline {
     }
 
     private fun releaseResources() {
+        if (grainGeneratorProgram != 0) {
+            GLES31.glDeleteProgram(grainGeneratorProgram)
+            grainGeneratorProgram = 0
+        }
         if (pass1Program != 0) {
             GLES31.glDeleteProgram(pass1Program)
             pass1Program = 0
@@ -441,6 +550,8 @@ class GpuPipeline {
         val maxStorageBlocks = IntArray(1)
         val maxStorageBindings = IntArray(1)
         val maxComputeTextureUnits = IntArray(1)
+        val maxComputeImageUniforms = IntArray(1)
+        val maxTextureSize = IntArray(1)
         val maxBlockSize = LongArray(1)
 
         GLES31.glGetIntegerv(GLES30.GL_MAJOR_VERSION, major, 0)
@@ -471,6 +582,16 @@ class GpuPipeline {
             maxComputeTextureUnits,
             0
         )
+        GLES31.glGetIntegerv(
+            GLES31.GL_MAX_COMPUTE_IMAGE_UNIFORMS,
+            maxComputeImageUniforms,
+            0
+        )
+        GLES31.glGetIntegerv(
+            GLES30.GL_MAX_TEXTURE_SIZE,
+            maxTextureSize,
+            0
+        )
         GLES30.glGetInteger64v(
             GLES31.GL_MAX_SHADER_STORAGE_BLOCK_SIZE,
             maxBlockSize,
@@ -485,6 +606,8 @@ class GpuPipeline {
             "workgroupInvocations=${maxInvocations[0]}, workgroupSizeX=${maxWorkGroupSizeX[0]}, " +
             "computeStorageBlocks=${maxStorageBlocks[0]}, storageBindings=${maxStorageBindings[0]}, " +
             "computeTextureUnits=${maxComputeTextureUnits[0]}, " +
+            "computeImageUniforms=${maxComputeImageUniforms[0]}, " +
+            "maxTextureSize=${maxTextureSize[0]}, " +
             "maxStorageBlockBytes=${maxBlockSize[0]}"
         Log.i(TAG, "GPU capabilities: $details")
 
@@ -505,6 +628,16 @@ class GpuPipeline {
         if (maxComputeTextureUnits[0] < REQUIRED_COMPUTE_TEXTURE_UNITS) {
             throw UnsupportedOperationException(
                 "$REQUIRED_COMPUTE_TEXTURE_UNITS compute texture units are required; $details"
+            )
+        }
+        if (maxComputeImageUniforms[0] < REQUIRED_COMPUTE_IMAGE_UNIFORMS) {
+            throw UnsupportedOperationException(
+                "$REQUIRED_COMPUTE_IMAGE_UNIFORMS compute image uniform is required; $details"
+            )
+        }
+        if (maxTextureSize[0] < GRAIN_PRIMARY_SIZE) {
+            throw UnsupportedOperationException(
+                "${GRAIN_PRIMARY_SIZE}x$GRAIN_PRIMARY_SIZE textures are required; $details"
             )
         }
         if (maxBlockSize[0] < LOOKUP_FLOAT_COUNT * 4L) {
@@ -584,26 +717,83 @@ class GpuPipeline {
         return (hash and 0xffffu).toFloat()
     }
 
-    private fun uploadGrainTexture(
-        context: Context,
-        textureId: Int,
-        assetPath: String,
-        size: Int
-    ) {
-        val encodedGrain = context.assets.open(assetPath).use { it.readBytes() }
-        check(encodedGrain.size == size * size) {
-            "$assetPath must contain exactly ${size * size} bytes"
+    private fun generateGrainTextures() {
+        val workspaceTexture = IntArray(1)
+        val framebuffer = IntArray(1)
+        GLES31.glGenTextures(1, workspaceTexture, 0)
+        GLES31.glBindTexture(
+            GLES31.GL_TEXTURE_2D,
+            workspaceTexture[0]
+        )
+        GLES30.glTexStorage2D(
+            GLES31.GL_TEXTURE_2D,
+            1,
+            GLES30.GL_RGBA8,
+            GRAIN_PRIMARY_SIZE,
+            GRAIN_PRIMARY_SIZE
+        )
+        GLES30.glGenFramebuffers(1, framebuffer, 0)
+        GLES30.glBindFramebuffer(
+            GLES30.GL_READ_FRAMEBUFFER,
+            framebuffer[0]
+        )
+        GLES30.glFramebufferTexture2D(
+            GLES30.GL_READ_FRAMEBUFFER,
+            GLES30.GL_COLOR_ATTACHMENT0,
+            GLES31.GL_TEXTURE_2D,
+            workspaceTexture[0],
+            0
+        )
+        check(
+            GLES30.glCheckFramebufferStatus(GLES30.GL_READ_FRAMEBUFFER) ==
+                GLES30.GL_FRAMEBUFFER_COMPLETE
+        ) {
+            "Procedural grain workspace framebuffer is incomplete"
         }
-        val pixels = ByteBuffer.allocateDirect(encodedGrain.size)
-            .order(ByteOrder.nativeOrder())
-        pixels.put(encodedGrain)
-        pixels.position(0)
 
+        try {
+            generateGrainTexture(
+                grainTextures[GRAIN_PRIMARY_TEXTURE_UNIT],
+                workspaceTexture[0],
+                framebuffer[0],
+                GRAIN_PRIMARY_SIZE,
+                0x243f6a88u
+            )
+            generateGrainTexture(
+                grainTextures[GRAIN_SECONDARY_TEXTURE_UNIT],
+                workspaceTexture[0],
+                framebuffer[0],
+                GRAIN_SECONDARY_SIZE,
+                0x9e3779b9u
+            )
+        } finally {
+            GLES31.glBindImageTexture(
+                0,
+                0,
+                0,
+                false,
+                0,
+                GLES31.GL_WRITE_ONLY,
+                GLES30.GL_RGBA8
+            )
+            GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, 0)
+            GLES30.glDeleteFramebuffers(1, framebuffer, 0)
+            GLES31.glDeleteTextures(1, workspaceTexture, 0)
+        }
+    }
+
+    private fun generateGrainTexture(
+        textureId: Int,
+        workspaceTextureId: Int,
+        framebufferId: Int,
+        size: Int,
+        seed: UInt
+    ) {
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, textureId)
         GLES31.glTexParameteri(
             GLES31.GL_TEXTURE_2D,
             GLES31.GL_TEXTURE_MIN_FILTER,
-            GLES31.GL_LINEAR
+            GLES31.GL_LINEAR_MIPMAP_LINEAR
         )
         GLES31.glTexParameteri(
             GLES31.GL_TEXTURE_2D,
@@ -620,20 +810,64 @@ class GpuPipeline {
             GLES31.GL_TEXTURE_WRAP_T,
             GLES31.GL_REPEAT
         )
-        GLES31.glPixelStorei(GLES31.GL_UNPACK_ALIGNMENT, 1)
-        GLES30.glTexImage2D(
+        val mipLevels = Int.SIZE_BITS - Integer.numberOfLeadingZeros(size)
+        GLES30.glTexStorage2D(
             GLES31.GL_TEXTURE_2D,
-            0,
+            mipLevels,
             GLES30.GL_R8,
             size,
-            size,
-            0,
-            GLES30.GL_RED,
-            GLES31.GL_UNSIGNED_BYTE,
-            pixels
+            size
         )
+
+        GLES31.glUseProgram(grainGeneratorProgram)
+        val textureSizeLocation = GLES31.glGetUniformLocation(
+            grainGeneratorProgram,
+            "uTextureSize"
+        )
+        val seedLocation = GLES31.glGetUniformLocation(
+            grainGeneratorProgram,
+            "uSeed"
+        )
+        GLES20.glUniform1i(textureSizeLocation, size)
+        GLES30.glUniform1ui(seedLocation, seed.toInt())
+        GLES31.glBindImageTexture(
+            0,
+            workspaceTextureId,
+            0,
+            false,
+            0,
+            GLES31.GL_WRITE_ONLY,
+            GLES30.GL_RGBA8
+        )
+        val groupCount =
+            (size + GRAIN_GENERATOR_WORKGROUP_SIZE - 1) /
+                GRAIN_GENERATOR_WORKGROUP_SIZE
+        GLES31.glDispatchCompute(groupCount, groupCount, 1)
+        GLES31.glMemoryBarrier(
+            GLES31.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT or
+                GLES31.GL_TEXTURE_FETCH_BARRIER_BIT or
+                GLES31.GL_TEXTURE_UPDATE_BARRIER_BIT or
+                GLES31.GL_FRAMEBUFFER_BARRIER_BIT
+        )
+        GLES30.glBindFramebuffer(
+            GLES30.GL_READ_FRAMEBUFFER,
+            framebufferId
+        )
+        GLES30.glReadBuffer(GLES30.GL_COLOR_ATTACHMENT0)
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, textureId)
+        GLES30.glCopyTexSubImage2D(
+            GLES31.GL_TEXTURE_2D,
+            0,
+            0,
+            0,
+            0,
+            0,
+            size,
+            size
+        )
+        GLES31.glGenerateMipmap(GLES31.GL_TEXTURE_2D)
         GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, 0)
-        checkGlError("grain texture upload: $assetPath")
+        checkGlError("procedural grain texture generation: ${size}x$size")
     }
 
     private fun uploadFloatBuffer(ssboId: Int, offsetBytes: Int, data: FloatArray) {

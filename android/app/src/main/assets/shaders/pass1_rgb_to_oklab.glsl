@@ -25,6 +25,11 @@ layout(std430, binding = 3) readonly buffer LookupData {
 };
 
 uniform uint uPixelCount;
+uniform float uVignetteAmount;
+uniform float uVignetteFalloff;
+uniform int uImageWidth;
+uniform ivec2 uImageOrigin;
+uniform ivec2 uFullImageSize;
 
 // ── sRGB EOTF ──
 float srgb_eotf(float v) {
@@ -93,6 +98,42 @@ void main() {
 
     // Step 2: Linear RGB → OKLab
     vec3 rgb = vec3(rLin, gLin, bLin);
+    if (uVignetteAmount > 0.0) {
+        int localX = int(idx % uint(uImageWidth));
+        int localY = int(idx / uint(uImageWidth));
+        vec2 globalPixel = vec2(
+            uImageOrigin + ivec2(localX, localY)
+        ) + vec2(0.5);
+        vec2 fullImageSize = vec2(uFullImageSize);
+        vec2 imageCenter = fullImageSize * 0.5;
+        float normalizationRadius =
+            length(fullImageSize) * 0.5;
+        vec2 normalizedPosition =
+            (globalPixel - imageCenter) / normalizationRadius;
+        float radiusSquared = clamp(
+            dot(normalizedPosition, normalizedPosition),
+            0.0,
+            1.0
+        );
+        float falloff = pow(
+            radiusSquared,
+            uVignetteFalloff * 0.5
+        );
+        float sourceBrightness = dot(
+            vec3(r, g, b),
+            vec3(0.2126, 0.7152, 0.0722)
+        );
+        float sourceBrightnessSquared =
+            sourceBrightness * sourceBrightness;
+        float highlightMask =
+            sourceBrightnessSquared * sourceBrightnessSquared;
+        float effectiveStops =
+            uVignetteAmount * falloff
+            * (1.0 - highlightMask);
+        float exposureGain =
+            exp2(-effectiveStops);
+        rgb *= exposureGain;
+    }
     vec3 lms = M1 * rgb;
 
     // Cube root (sign-preserving for safety)
