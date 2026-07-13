@@ -209,7 +209,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_light -> LightFragment()
                 R.id.nav_color -> ColorFragment()
                 R.id.nav_zoned_tint -> ZonedTintFragment()
-                R.id.nav_grain -> GrainFragment()
+                R.id.nav_fx -> GrainFragment()
                 else -> return@setOnItemSelectedListener false
             }
             supportFragmentManager.beginTransaction()
