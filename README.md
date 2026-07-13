@@ -1,13 +1,14 @@
 # The Great Equalizer
 
-A playful Android photo editor for punchy, unpredictable toy-camera looks.
+A photo editor for Android that is heavily inspired by the Digital Harinezumi and other "toy cameras" and their crunchy, high-contrast look.
 
 ## What it does
 
-- Uses **histogram equalization** to spread light and color across their
-  ranges, creating contrast across the whole image.
+- Uses **histogram equalization** to redistribute light and color, creating
+  contrast across the whole image.
 - Starts with a look close to the original photo.
-- The dice button, or a shake, quickly brings up randomized looks to explore.
+- Adds adjustable grain and vignetting.
+- Press the dice button or shake your phone to explore randomized looks.
 
 ## Build
 
