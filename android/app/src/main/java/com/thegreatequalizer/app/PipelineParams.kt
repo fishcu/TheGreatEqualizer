@@ -25,5 +25,9 @@ data class PipelineParams(
     val midtoneTintAngle: Float = 0.0f,
     val midtoneTintStrength: Float = 0.0f,
     val highlightTintAngle: Float = 0.0f,
-    val highlightTintStrength: Float = 0.0f
+    val highlightTintStrength: Float = 0.0f,
+
+    // Grain tab
+    val grainAmount: Float = 0.0f,           // OKLab L standard deviation at midtones
+    val grainSize: Float = 1.25f             // apparent grain diameter in output pixels
 )

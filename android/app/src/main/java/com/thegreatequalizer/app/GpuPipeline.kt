@@ -7,6 +7,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.nio.IntBuffer
+import kotlin.math.sqrt
 
 /**
  * GPU compute pipeline using GLES 3.1 compute shaders.
@@ -32,6 +33,13 @@ class GpuPipeline {
         private const val TRANSFER_C_OFFSET = TRANSFER_L_OFFSET + NUM_BINS
         private const val CDF_OFFSET = TRANSFER_C_OFFSET + NUM_BINS
         private const val LOOKUP_FLOAT_COUNT = CDF_OFFSET + NUM_BINS
+        private const val GRAIN_PRIMARY_SIZE = 512
+        private const val GRAIN_SECONDARY_SIZE = 509
+        private const val GRAIN_PRIMARY_TEXTURE_UNIT = 0
+        private const val GRAIN_SECONDARY_TEXTURE_UNIT = 1
+        private const val REQUIRED_COMPUTE_TEXTURE_UNITS = 2
+        private const val GRAIN_REFERENCE_SIZE = 1.25f
+        private const val GRAIN_OFFSET_Y_SALT = 0x9e3779b9u
         private const val PIXEL_BINDING = 0
         private const val ANALYSIS_BINDING = 1
         private const val HUE_BINDING = 2
@@ -62,9 +70,17 @@ class GpuPipeline {
     private var pass2MidStrLoc = 0
     private var pass2HiAngleLoc = 0
     private var pass2HiStrLoc = 0
+    private var pass2GrainPrimaryLoc = 0
+    private var pass2GrainSecondaryLoc = 0
+    private var pass2GrainAmountLoc = 0
+    private var pass2GrainSizeLoc = 0
+    private var pass2GrainPatternOffsetLoc = 0
+    private var pass2ImageWidthLoc = 0
+    private var pass2ImageOriginLoc = 0
 
     // binding 0=pixel input/output, 1=interleaved L/C_rel, 2=hue, 3=all lookup data
     private val ssbos = IntArray(REQUIRED_SSBO_BLOCKS)
+    private val grainTextures = IntArray(REQUIRED_COMPUTE_TEXTURE_UNITS)
     private var maxPixelCount = 0
     private var maxShaderStorageBlockSize = 0L
     private var initialized = false
@@ -75,6 +91,14 @@ class GpuPipeline {
     data class Pass1Result(
         val L: FloatArray,
         val cRel: FloatArray
+    )
+
+    data class GrainRenderParams(
+        val amount: Float,
+        val size: Float,
+        val rowWidth: Int,
+        val originX: Int,
+        val originY: Int
     )
 
     /**
@@ -106,10 +130,32 @@ class GpuPipeline {
             pass2MidStrLoc = GLES31.glGetUniformLocation(pass2Program, "uMidStr")
             pass2HiAngleLoc = GLES31.glGetUniformLocation(pass2Program, "uHiAngle")
             pass2HiStrLoc = GLES31.glGetUniformLocation(pass2Program, "uHiStr")
+            pass2GrainPrimaryLoc = GLES31.glGetUniformLocation(pass2Program, "uGrainPrimary")
+            pass2GrainSecondaryLoc = GLES31.glGetUniformLocation(pass2Program, "uGrainSecondary")
+            pass2GrainAmountLoc = GLES31.glGetUniformLocation(pass2Program, "uGrainAmount")
+            pass2GrainSizeLoc = GLES31.glGetUniformLocation(pass2Program, "uGrainSize")
+            pass2GrainPatternOffsetLoc =
+                GLES31.glGetUniformLocation(pass2Program, "uGrainPatternOffset")
+            pass2ImageWidthLoc = GLES31.glGetUniformLocation(pass2Program, "uImageWidth")
+            pass2ImageOriginLoc = GLES31.glGetUniformLocation(pass2Program, "uImageOrigin")
 
             GLES31.glGenBuffers(1, ssbos, LOOKUP_BINDING)
             allocateSsbo(ssbos[LOOKUP_BINDING], LOOKUP_FLOAT_COUNT * 4)
             uploadFloatBuffer(ssbos[LOOKUP_BINDING], 0, gamutLut)
+
+            GLES31.glGenTextures(grainTextures.size, grainTextures, 0)
+            uploadGrainTexture(
+                context,
+                grainTextures[GRAIN_PRIMARY_TEXTURE_UNIT],
+                "grain/grain_primary_r8.bin",
+                GRAIN_PRIMARY_SIZE
+            )
+            uploadGrainTexture(
+                context,
+                grainTextures[GRAIN_SECONDARY_TEXTURE_UNIT],
+                "grain/grain_secondary_r8.bin",
+                GRAIN_SECONDARY_SIZE
+            )
             checkGlError("lookup buffer initialization")
 
             initialized = true
@@ -217,9 +263,22 @@ class GpuPipeline {
         blackC: Float,
         whiteC: Float,
         chromaParams: FloatArray,  // [shAngle, shStr, midAngle, midStr, hiAngle, hiStr]
+        grainParams: GrainRenderParams,
         pixelCount: Int
     ): IntArray {
         check(initialized) { "GpuPipeline not initialized" }
+        require(grainParams.amount in 0.0f..0.15f) {
+            "Grain amount must be in [0.0, 0.15]"
+        }
+        require(grainParams.size in 0.25f..4.0f) {
+            "Grain size must be in [0.25, 4.0]"
+        }
+        require(grainParams.rowWidth > 0 && pixelCount % grainParams.rowWidth == 0) {
+            "Pixel count must contain complete rows"
+        }
+        require(grainParams.originX >= 0 && grainParams.originY >= 0) {
+            "Grain origin must be non-negative"
+        }
 
         val numGroups = (pixelCount + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE
 
@@ -244,6 +303,34 @@ class GpuPipeline {
         GLES20.glUniform1f(pass2MidStrLoc, chromaParams[3])
         GLES20.glUniform1f(pass2HiAngleLoc, chromaParams[4])
         GLES20.glUniform1f(pass2HiStrLoc, chromaParams[5])
+        val grainGain = sqrt(GRAIN_REFERENCE_SIZE / grainParams.size)
+        GLES20.glUniform1f(pass2GrainAmountLoc, grainParams.amount * grainGain)
+        GLES20.glUniform1f(pass2GrainSizeLoc, grainParams.size)
+        val sizeBits = grainParams.size.toRawBits().toUInt()
+        GLES20.glUniform2f(
+            pass2GrainPatternOffsetLoc,
+            grainOffset(sizeBits),
+            grainOffset(sizeBits xor GRAIN_OFFSET_Y_SALT)
+        )
+        GLES20.glUniform1i(pass2ImageWidthLoc, grainParams.rowWidth)
+        GLES20.glUniform2i(
+            pass2ImageOriginLoc,
+            grainParams.originX,
+            grainParams.originY
+        )
+
+        GLES31.glActiveTexture(GLES31.GL_TEXTURE0 + GRAIN_PRIMARY_TEXTURE_UNIT)
+        GLES31.glBindTexture(
+            GLES31.GL_TEXTURE_2D,
+            grainTextures[GRAIN_PRIMARY_TEXTURE_UNIT]
+        )
+        GLES20.glUniform1i(pass2GrainPrimaryLoc, GRAIN_PRIMARY_TEXTURE_UNIT)
+        GLES31.glActiveTexture(GLES31.GL_TEXTURE0 + GRAIN_SECONDARY_TEXTURE_UNIT)
+        GLES31.glBindTexture(
+            GLES31.GL_TEXTURE_2D,
+            grainTextures[GRAIN_SECONDARY_TEXTURE_UNIT]
+        )
+        GLES20.glUniform1i(pass2GrainSecondaryLoc, GRAIN_SECONDARY_TEXTURE_UNIT)
 
         // Dispatch pass 2
         GLES31.glDispatchCompute(numGroups, 1, 1)
@@ -274,6 +361,10 @@ class GpuPipeline {
         if (pass2Program != 0) {
             GLES31.glDeleteProgram(pass2Program)
             pass2Program = 0
+        }
+        if (grainTextures.any { it != 0 }) {
+            GLES31.glDeleteTextures(grainTextures.size, grainTextures, 0)
+            grainTextures.fill(0)
         }
 
         val allocatedSsbos = ssbos.filter { it != 0 }.toIntArray()
@@ -349,6 +440,7 @@ class GpuPipeline {
         val maxWorkGroupSizeX = IntArray(1)
         val maxStorageBlocks = IntArray(1)
         val maxStorageBindings = IntArray(1)
+        val maxComputeTextureUnits = IntArray(1)
         val maxBlockSize = LongArray(1)
 
         GLES31.glGetIntegerv(GLES30.GL_MAJOR_VERSION, major, 0)
@@ -374,6 +466,11 @@ class GpuPipeline {
             maxStorageBindings,
             0
         )
+        GLES31.glGetIntegerv(
+            GLES31.GL_MAX_COMPUTE_TEXTURE_IMAGE_UNITS,
+            maxComputeTextureUnits,
+            0
+        )
         GLES30.glGetInteger64v(
             GLES31.GL_MAX_SHADER_STORAGE_BLOCK_SIZE,
             maxBlockSize,
@@ -387,6 +484,7 @@ class GpuPipeline {
         val details = "version=$version, renderer=$renderer, vendor=$vendor, " +
             "workgroupInvocations=${maxInvocations[0]}, workgroupSizeX=${maxWorkGroupSizeX[0]}, " +
             "computeStorageBlocks=${maxStorageBlocks[0]}, storageBindings=${maxStorageBindings[0]}, " +
+            "computeTextureUnits=${maxComputeTextureUnits[0]}, " +
             "maxStorageBlockBytes=${maxBlockSize[0]}"
         Log.i(TAG, "GPU capabilities: $details")
 
@@ -402,6 +500,11 @@ class GpuPipeline {
             maxStorageBindings[0] < REQUIRED_SSBO_BLOCKS) {
             throw UnsupportedOperationException(
                 "$REQUIRED_SSBO_BLOCKS compute shader-storage blocks are required; $details"
+            )
+        }
+        if (maxComputeTextureUnits[0] < REQUIRED_COMPUTE_TEXTURE_UNITS) {
+            throw UnsupportedOperationException(
+                "$REQUIRED_COMPUTE_TEXTURE_UNITS compute texture units are required; $details"
             )
         }
         if (maxBlockSize[0] < LOOKUP_FLOAT_COUNT * 4L) {
@@ -469,6 +572,68 @@ class GpuPipeline {
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, id)
         GLES31.glBufferData(GLES31.GL_SHADER_STORAGE_BUFFER, sizeBytes, null, GLES31.GL_DYNAMIC_COPY)
         GLES31.glBindBuffer(GLES31.GL_SHADER_STORAGE_BUFFER, 0)
+    }
+
+    private fun grainOffset(value: UInt): Float {
+        var hash = value
+        hash = hash xor (hash shr 16)
+        hash *= 0x7feb352du
+        hash = hash xor (hash shr 15)
+        hash *= 0x846ca68bu
+        hash = hash xor (hash shr 16)
+        return (hash and 0xffffu).toFloat()
+    }
+
+    private fun uploadGrainTexture(
+        context: Context,
+        textureId: Int,
+        assetPath: String,
+        size: Int
+    ) {
+        val encodedGrain = context.assets.open(assetPath).use { it.readBytes() }
+        check(encodedGrain.size == size * size) {
+            "$assetPath must contain exactly ${size * size} bytes"
+        }
+        val pixels = ByteBuffer.allocateDirect(encodedGrain.size)
+            .order(ByteOrder.nativeOrder())
+        pixels.put(encodedGrain)
+        pixels.position(0)
+
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, textureId)
+        GLES31.glTexParameteri(
+            GLES31.GL_TEXTURE_2D,
+            GLES31.GL_TEXTURE_MIN_FILTER,
+            GLES31.GL_LINEAR
+        )
+        GLES31.glTexParameteri(
+            GLES31.GL_TEXTURE_2D,
+            GLES31.GL_TEXTURE_MAG_FILTER,
+            GLES31.GL_LINEAR
+        )
+        GLES31.glTexParameteri(
+            GLES31.GL_TEXTURE_2D,
+            GLES31.GL_TEXTURE_WRAP_S,
+            GLES31.GL_REPEAT
+        )
+        GLES31.glTexParameteri(
+            GLES31.GL_TEXTURE_2D,
+            GLES31.GL_TEXTURE_WRAP_T,
+            GLES31.GL_REPEAT
+        )
+        GLES31.glPixelStorei(GLES31.GL_UNPACK_ALIGNMENT, 1)
+        GLES30.glTexImage2D(
+            GLES31.GL_TEXTURE_2D,
+            0,
+            GLES30.GL_R8,
+            size,
+            size,
+            0,
+            GLES30.GL_RED,
+            GLES31.GL_UNSIGNED_BYTE,
+            pixels
+        )
+        GLES31.glBindTexture(GLES31.GL_TEXTURE_2D, 0)
+        checkGlError("grain texture upload: $assetPath")
     }
 
     private fun uploadFloatBuffer(ssboId: Int, offsetBytes: Int, data: FloatArray) {

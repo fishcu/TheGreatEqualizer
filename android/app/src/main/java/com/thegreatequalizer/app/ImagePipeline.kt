@@ -403,7 +403,15 @@ object ImagePipeline {
             transferL, transferC, cdfValuesFloat,
             blackL.toFloat(), whiteL.toFloat(),
             blackC.toFloat(), whiteC.toFloat(),
-            chromaParams, pixelCount
+            chromaParams,
+            GpuPipeline.GrainRenderParams(
+                amount = 0.0f,
+                size = 1.25f,
+                rowWidth = width,
+                originX = 0,
+                originY = 0
+            ),
+            pixelCount
         )
         mark("Steps 6-12 GPU pass2", tStep)
 
@@ -550,7 +558,15 @@ object ImagePipeline {
             transferL, transferC, cdfValuesFloat,
             blackL.toFloat(), whiteL.toFloat(),
             params.colorBlacks, params.colorWhites,
-            chromaParams, pixelCount
+            chromaParams,
+            GpuPipeline.GrainRenderParams(
+                amount = params.grainAmount,
+                size = params.grainSize,
+                rowWidth = width,
+                originX = 0,
+                originY = 0
+            ),
+            pixelCount
         )
 
         val outBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -676,7 +692,15 @@ object ImagePipeline {
                     transferL, transferC, cdfValuesFloat,
                     blackL.toFloat(), whiteL.toFloat(),
                     blackC, whiteC,
-                    chromaParams, tilePixelCount
+                    chromaParams,
+                    GpuPipeline.GrainRenderParams(
+                        amount = params.grainAmount,
+                        size = params.grainSize,
+                        rowWidth = tileW,
+                        originX = x0,
+                        originY = y0
+                    ),
+                    tilePixelCount
                 )
 
                 // Write tile to output bitmap
@@ -798,7 +822,15 @@ object ImagePipeline {
             transferL, transferC, cdfValuesFloat,
             blackL.toFloat(), whiteL.toFloat(),
             params.colorBlacks, params.colorWhites,
-            chromaParams, pixelCount
+            chromaParams,
+            GpuPipeline.GrainRenderParams(
+                amount = params.grainAmount,
+                size = params.grainSize,
+                rowWidth = cropW,
+                originX = cropX,
+                originY = cropY
+            ),
+            pixelCount
         )
 
         val outBitmap = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)

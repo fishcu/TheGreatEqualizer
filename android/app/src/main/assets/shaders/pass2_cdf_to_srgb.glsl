@@ -43,6 +43,16 @@ uniform float uMidStr;
 uniform float uHiAngle;
 uniform float uHiStr;
 
+// L-channel grain. The two independently generated, incommensurate tiles
+// produce a long repeat period while requiring only two filtered samples.
+uniform highp sampler2D uGrainPrimary;
+uniform highp sampler2D uGrainSecondary;
+uniform float uGrainAmount;
+uniform float uGrainSize;
+uniform vec2 uGrainPatternOffset;
+uniform int uImageWidth;
+uniform ivec2 uImageOrigin;
+
 // ── Constants ──
 const int NUM_BINS = 256;
 const int GAMUT_SIZE = 256 * 360;
@@ -55,6 +65,13 @@ const int GAMUT_N_H = 360;
 const float ZONE_BOUNDARY_LO = 1.0 / 3.0;
 const float ZONE_BOUNDARY_HI = 2.0 / 3.0;
 const float ZONE_HALF_W = 1.0 / 4.0;
+const float GRAIN_REFERENCE_SIZE = 1.25;
+const float GRAIN_PRIMARY_SIZE = 512.0;
+const float GRAIN_SECONDARY_SIZE = 509.0;
+const float GRAIN_TEXTURE_RANGE = 4.0;
+const float GRAIN_SECONDARY_OFFSET = 137.0;
+const float GRAIN_INV_SQRT_2 = 0.70710678118655;
+const float GRAIN_EDGE_STRENGTH = 0.15;
 
 // ── M2 inverse: OKLab → cube-root LMS ──
 const mat3 M2_INV = mat3(
@@ -138,6 +155,28 @@ float srgb_oetf(float v) {
     return (v <= 0.0031308) ? (12.92 * v) : (1.055 * pow(v, 1.0 / 2.4) - 0.055);
 }
 
+float sampleGrain(vec2 globalPixel) {
+    float coordinateScale = GRAIN_REFERENCE_SIZE / uGrainSize;
+    vec2 primaryUv =
+        (
+            globalPixel * coordinateScale + uGrainPatternOffset
+        ) / GRAIN_PRIMARY_SIZE;
+    vec2 secondaryPixel = vec2(-globalPixel.y, globalPixel.x)
+        + vec2(GRAIN_SECONDARY_OFFSET);
+    vec2 secondaryUv =
+        (
+            secondaryPixel * coordinateScale
+            + vec2(uGrainPatternOffset.y, -uGrainPatternOffset.x)
+        ) / GRAIN_SECONDARY_SIZE;
+    float primary = (
+        textureLod(uGrainPrimary, primaryUv, 0.0).r * 2.0 - 1.0
+    ) * GRAIN_TEXTURE_RANGE;
+    float secondary = (
+        textureLod(uGrainSecondary, secondaryUv, 0.0).r * 2.0 - 1.0
+    ) * GRAIN_TEXTURE_RANGE;
+    return (primary + secondary) * GRAIN_INV_SQRT_2;
+}
+
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uPixelCount) return;
@@ -185,7 +224,24 @@ void main() {
     aVal += wS * daS + wM * daM + wH * daH;
     bVal += wS * dbS + wM * dbM + wH * dbH;
 
-    // ── Step 11: Gamut clamp ──
+    // ── Step 11: Signal-dependent L-channel grain ──
+    if (uGrainAmount > 0.0) {
+        int localX = int(idx % uint(uImageWidth));
+        int localY = int(idx / uint(uImageWidth));
+        vec2 globalPixel = vec2(
+            uImageOrigin + ivec2(localX, localY)
+        ) + vec2(0.5);
+        float midtoneWeight = clamp(4.0 * lOut * (1.0 - lOut), 0.0, 1.0);
+        float envelope = GRAIN_EDGE_STRENGTH
+            + (1.0 - GRAIN_EDGE_STRENGTH) * midtoneWeight;
+        lOut = clamp(
+            lOut + uGrainAmount * envelope * sampleGrain(globalPixel),
+            0.0,
+            1.0
+        );
+    }
+
+    // ── Step 12: Gamut clamp ──
     float cPost = sqrt(aVal * aVal + bVal * bVal);
     float maxC = lookupGamutMax(lOut, hue);
     if (cPost > 1e-10) {
@@ -194,7 +250,7 @@ void main() {
         bVal *= scale;
     }
 
-    // ── Step 12: OKLab → linear RGB → sRGB ──
+    // ── Step 13: OKLab → linear RGB → sRGB ──
     vec3 lab = vec3(lOut, aVal, bVal);
     vec3 lmsG = M2_INV * lab;
     vec3 lms = lmsG * lmsG * lmsG;  // cube

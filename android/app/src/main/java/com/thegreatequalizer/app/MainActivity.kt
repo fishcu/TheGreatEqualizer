@@ -41,6 +41,7 @@ import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
@@ -208,6 +209,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_light -> LightFragment()
                 R.id.nav_color -> ColorFragment()
                 R.id.nav_zoned_tint -> ZonedTintFragment()
+                R.id.nav_grain -> GrainFragment()
                 else -> return@setOnItemSelectedListener false
             }
             supportFragmentManager.beginTransaction()
@@ -427,6 +429,7 @@ class MainActivity : AppCompatActivity() {
             is LightFragment -> currentFragment.updateFromParams()
             is ColorFragment -> currentFragment.updateFromParams()
             is ZonedTintFragment -> currentFragment.updateFromParams()
+            is GrainFragment -> currentFragment.updateFromParams()
         }
     }
 
@@ -468,7 +471,13 @@ class MainActivity : AppCompatActivity() {
             midtoneTintAngle = Random.nextFloat() * twoPi,
             midtoneTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
             highlightTintAngle = Random.nextFloat() * twoPi,
-            highlightTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f)
+            highlightTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
+
+            // Grain — half-normal amount and log-normal apparent size
+            grainAmount = abs(rng.nextGaussian().toFloat() * 0.04f).coerceIn(0f, 0.15f),
+            grainSize = (
+                defaults.grainSize * exp(rng.nextGaussian() * 0.7).toFloat()
+            ).coerceIn(0.25f, 4.0f)
         )
 
         // Haptic feedback

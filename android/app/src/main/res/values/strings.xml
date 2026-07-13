@@ -6,6 +6,7 @@
     <string name="nav_light">Light</string>
     <string name="nav_color">Color</string>
     <string name="nav_zoned_tint">Zoned Tint</string>
+    <string name="nav_grain">Grain</string>
     <string name="image_description">Processed image</string>
     <string name="add_photo">Add photo</string>
     <string name="action_share">Share</string>
@@ -27,4 +28,6 @@
     <string name="label_tint_shadows">Shadows</string>
     <string name="label_tint_midtones">Midtones</string>
     <string name="label_tint_highlights">Highlights</string>
+    <string name="label_grain_amount">Amount</string>
+    <string name="label_grain_size">Size</string>
 </resources>

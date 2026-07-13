@@ -16,4 +16,9 @@
         android:icon="@drawable/ic_baseline_tune_24"
         android:title="@string/nav_zoned_tint" />
 
+    <item
+        android:id="@+id/nav_grain"
+        android:icon="@drawable/ic_magic_wand_24"
+        android:title="@string/nav_grain" />
+
 </menu>
