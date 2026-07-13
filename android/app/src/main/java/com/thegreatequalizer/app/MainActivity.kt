@@ -446,23 +446,69 @@ class MainActivity : AppCompatActivity() {
         fun gaussian(center: Float, sd: Float, min: Float, max: Float): Float =
             (center + rng.nextGaussian().toFloat() * sd).coerceIn(min, max)
 
-        fun angleParam(center: Float): Float =
-            gaussian(center, 0.15f * (pi / 2), 0f, pi / 2)
+        fun truncatedGaussian(
+            center: Float,
+            sd: Float,
+            min: Float,
+            max: Float
+        ): Float {
+            var sample: Float
+            do {
+                sample = center + rng.nextGaussian().toFloat() * sd
+            } while (sample !in min..max)
+            return sample
+        }
+
+        fun fittedParam(center: Float, name: String, sd: Float): Float {
+            val bounds = FitParams.PARAM_BOUNDS[name]!!
+            return gaussian(
+                center,
+                sd,
+                bounds.first.toFloat(),
+                bounds.second.toFloat()
+            )
+        }
+
+        fun angleParam(center: Float, name: String): Float =
+            fittedParam(center, name, 0.15f * (pi / 2))
 
         val newParams = fitted.copy(
             // Light tab — randomize around the per-image fit
-            lightShadows = angleParam(fitted.lightShadows),
-            lightHighlights = angleParam(fitted.lightHighlights),
-            lightMidtoneBalance = gaussian(fitted.lightMidtoneBalance, 0.15f, 0f, 1f),
-            lightMidtoneContrast = angleParam(fitted.lightMidtoneContrast),
+            lightStrength = 1.0f - truncatedGaussian(
+                1.0f - fitted.lightStrength,
+                0.15f,
+                0.0f,
+                1.0f
+            ),
+            lightShadows = angleParam(fitted.lightShadows, "t"),
+            lightHighlights = angleParam(fitted.lightHighlights, "s"),
+            lightMidtoneBalance = fittedParam(
+                fitted.lightMidtoneBalance,
+                "c",
+                0.15f
+            ),
+            lightMidtoneContrast = angleParam(
+                fitted.lightMidtoneContrast,
+                "g"
+            ),
             lightBlacks = gaussian(fitted.lightBlacks, 0.15f, -1f, 1f),
             lightWhites = gaussian(fitted.lightWhites, 0.15f, -1f, 1f),
 
             // Color tab — randomize around the per-image fit
-            colorMutedColors = angleParam(fitted.colorMutedColors),
-            colorVividColors = angleParam(fitted.colorVividColors),
-            colorSaturationBalance = gaussian(fitted.colorSaturationBalance, 0.15f, 0f, 1f),
-            colorVibrancy = angleParam(fitted.colorVibrancy),
+            colorStrength = 1.0f - truncatedGaussian(
+                1.0f - fitted.colorStrength,
+                0.15f,
+                0.0f,
+                1.0f
+            ),
+            colorMutedColors = angleParam(fitted.colorMutedColors, "t"),
+            colorVividColors = angleParam(fitted.colorVividColors, "s"),
+            colorSaturationBalance = fittedParam(
+                fitted.colorSaturationBalance,
+                "c",
+                0.15f
+            ),
+            colorVibrancy = angleParam(fitted.colorVibrancy, "g"),
             colorBlacks = gaussian(fitted.colorBlacks, 0.15f, -1f, 1f),
             colorWhites = gaussian(fitted.colorWhites, 0.15f, -1f, 1f),
 
