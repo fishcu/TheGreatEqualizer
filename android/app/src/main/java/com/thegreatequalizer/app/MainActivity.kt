@@ -788,7 +788,11 @@ class MainActivity : AppCompatActivity() {
         activeEdit = null
         recordEdit(edit.label, edit.before, pipelineParams, edit.navigationItemId)
         updateHistoryButtons()
-        if (!isRendering) {
+        if (
+            !isRendering &&
+            hiResCropJob?.isActive != true &&
+            currentHiResBitmap == null
+        ) {
             maybeStartHiResCrop()
         }
     }
@@ -1000,10 +1004,6 @@ class MainActivity : AppCompatActivity() {
     private fun maybeStartHiResCrop() {
         cancelHiResCropJob()
         val gen = ++hiResCropGeneration
-        if (activeEdit != null) {
-            imageView.clearOverlay()
-            return
-        }
         if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) {
             imageView.clearOverlay()
             return
