@@ -147,13 +147,13 @@ class MainActivity : AppCompatActivity() {
 
         initializeGpuPipeline()
 
-        handleImageShareIntent(intent)
+        handleImageIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleImageShareIntent(intent)
+        handleImageIntent(intent)
     }
 
     override fun onResume() {
@@ -309,14 +309,18 @@ class MainActivity : AppCompatActivity() {
         updateHistoryButtons()
     }
 
-    private fun handleImageShareIntent(intent: Intent) {
-        if (intent.action != Intent.ACTION_SEND || intent.type?.startsWith("image/") != true) {
-            return
+    private fun handleImageIntent(intent: Intent) {
+        val uri = when (intent.action) {
+            Intent.ACTION_SEND -> {
+                if (intent.type?.startsWith("image/") != true) return
+                sharedImageUri(intent)
+            }
+            Intent.ACTION_VIEW -> intent.data
+            else -> return
         }
 
-        val uri = sharedImageUri(intent)
         if (uri == null) {
-            Toast.makeText(this, "No image was included in the share", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No image was included", Toast.LENGTH_SHORT).show()
             return
         }
 
