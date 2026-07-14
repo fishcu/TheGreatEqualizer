@@ -437,7 +437,6 @@ class MainActivity : AppCompatActivity() {
                 pipelineState = state
                 pipelineParams = params
                 processedBitmap = outBitmap
-                state.processedBitmap = outBitmap
                 imageView.setImageBitmap(outBitmap)
                 notifyFragmentUpdate()
                 updateHistoryButtons()
@@ -830,7 +829,6 @@ class MainActivity : AppCompatActivity() {
                     return@launch
                 }
                 processedBitmap = outBitmap
-                state.processedBitmap = outBitmap
                 if (!isShowingOriginal) {
                     updateImageBitmap(outBitmap)
                 }

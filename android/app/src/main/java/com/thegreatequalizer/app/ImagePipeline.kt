@@ -549,7 +549,6 @@ object ImagePipeline {
         for (i in L.indices) L[i] = L[i].coerceIn(0f, 1f)
 
         state.pass1L = L
-        state.pass1CRel = cRel
         state.vignetteAmount = 0.0f
         state.vignetteFalloff = params.vignetteFalloff
 
@@ -603,7 +602,6 @@ object ImagePipeline {
             pass1.L[index] = pass1.L[index].coerceIn(0.0f, 1.0f)
         }
         state.pass1L = pass1.L
-        state.pass1CRel = pass1.cRel
         state.vignetteAmount = params.vignetteAmount
         state.vignetteFalloff = params.vignetteFalloff
         val cacheMs = (System.nanoTime() - cacheStart) / 1_000_000
