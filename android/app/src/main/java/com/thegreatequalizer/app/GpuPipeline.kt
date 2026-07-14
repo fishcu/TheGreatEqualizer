@@ -97,6 +97,8 @@ class GpuPipeline {
     private val grainTextures = IntArray(REQUIRED_COMPUTE_TEXTURE_UNITS)
     private var maxPixelCount = 0
     private var maxShaderStorageBlockSize = 0L
+    private var reusableFloatUploadBuffer: FloatBuffer? = null
+    private var reusableIntUploadBuffer: IntBuffer? = null
     private var initialized = false
 
     /**
@@ -500,6 +502,8 @@ class GpuPipeline {
             ssbos.fill(0)
         }
 
+        reusableFloatUploadBuffer = null
+        reusableIntUploadBuffer = null
         destroyEgl()
     }
 
@@ -947,20 +951,34 @@ class GpuPipeline {
     }
 
     private fun allocateFloatBuffer(data: FloatArray): FloatBuffer {
-        val buf = ByteBuffer.allocateDirect(data.size * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
+        val existing = reusableFloatUploadBuffer
+        val buf = if (existing == null || existing.capacity() < data.size) {
+            ByteBuffer.allocateDirect(data.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asFloatBuffer()
+                .also { reusableFloatUploadBuffer = it }
+        } else {
+            existing
+        }
+        buf.clear()
         buf.put(data)
-        buf.position(0)
+        buf.flip()
         return buf
     }
 
     private fun allocateIntBuffer(data: IntArray): IntBuffer {
-        val buf = ByteBuffer.allocateDirect(data.size * 4)
-            .order(ByteOrder.nativeOrder())
-            .asIntBuffer()
+        val existing = reusableIntUploadBuffer
+        val buf = if (existing == null || existing.capacity() < data.size) {
+            ByteBuffer.allocateDirect(data.size * 4)
+                .order(ByteOrder.nativeOrder())
+                .asIntBuffer()
+                .also { reusableIntUploadBuffer = it }
+        } else {
+            existing
+        }
+        buf.clear()
         buf.put(data)
-        buf.position(0)
+        buf.flip()
         return buf
     }
 }

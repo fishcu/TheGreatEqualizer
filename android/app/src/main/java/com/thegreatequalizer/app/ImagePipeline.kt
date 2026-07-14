@@ -130,6 +130,23 @@ object ImagePipeline {
         return hist
     }
 
+    private fun computeTransferredHistogram(
+        channel: FloatArray,
+        transfer: FloatArray,
+        black: Float,
+        span: Float
+    ): DoubleArray {
+        val histogram = DoubleArray(NUM_BINS)
+        for (value in channel) {
+            val input = value.coerceIn(0.0f, 1.0f)
+            val mapped = interpUniform(input, transfer, NUM_BINS)
+            val output = (black + mapped * span).coerceIn(0.0f, 1.0f)
+            val bin = (output * (NUM_BINS - 1)).toInt().coerceIn(0, NUM_BINS - 1)
+            histogram[bin] += 1.0
+        }
+        return histogram
+    }
+
     /**
      * Cap histogram bins at [cap] and redistribute excess locally.
      * Each over-cap bin's excess is spread outward symmetrically.
@@ -437,15 +454,9 @@ object ImagePipeline {
         // Actually, we need the CDF of the *output* L values. Let's apply
         // the transfer to each L value to get output L, histogram that,
         // then compute CDF.
-        val lOut = FloatArray(pixelCount)
         val spanL = (1.0 + whiteL - blackL).toFloat()
-        for (i in 0 until pixelCount) {
-            val lIn = L[i].coerceIn(0f, 1f)
-            val lMapped = interpUniform(lIn, transferL, NUM_BINS)
-            lOut[i] = (blackL.toFloat() + lMapped * spanL).coerceIn(0f, 1f)
-        }
-
-        val outHistL = computeHistogram(lOut)
+        val outHistL =
+            computeTransferredHistogram(L, transferL, blackL.toFloat(), spanL)
         val outCdf = DoubleArray(NUM_BINS)
         var cdfCumSum = 0.0
         for (i in 0 until NUM_BINS) {
@@ -681,14 +692,8 @@ object ImagePipeline {
 
         // --- Build output CDF for zone weights ---
         val spanL = (1.0 + whiteL - blackL).toFloat()
-        val lOut = FloatArray(pixelCount)
-        for (i in 0 until pixelCount) {
-            val lIn = L[i].coerceIn(0f, 1f)
-            val lMapped = interpUniform(lIn, transferL, NUM_BINS)
-            lOut[i] = (blackL.toFloat() + lMapped * spanL).coerceIn(0f, 1f)
-        }
-
-        val outHistL = computeHistogram(lOut)
+        val outHistL =
+            computeTransferredHistogram(L, transferL, blackL.toFloat(), spanL)
         val outCdf = DoubleArray(NUM_BINS)
         var cdfCumSum = 0.0
         for (i in 0 until NUM_BINS) {
@@ -766,7 +771,6 @@ object ImagePipeline {
 
         // --- Compute transfer LUTs and CDF (same as processFromParams) ---
         val L = state.pass1L!!
-        val previewPixelCount = state.pixelCount
 
         // L channel
         val capL = (1.0f - params.lightSmoothing) *
@@ -823,14 +827,8 @@ object ImagePipeline {
 
         // Output CDF for zone weights (computed from preview L data)
         val spanL = (1.0 + whiteL - blackL).toFloat()
-        val lOut = FloatArray(previewPixelCount)
-        for (i in 0 until previewPixelCount) {
-            val lIn = L[i].coerceIn(0f, 1f)
-            val lMapped = interpUniform(lIn, transferL, NUM_BINS)
-            lOut[i] = (blackL.toFloat() + lMapped * spanL).coerceIn(0f, 1f)
-        }
-
-        val outHistL = computeHistogram(lOut)
+        val outHistL =
+            computeTransferredHistogram(L, transferL, blackL.toFloat(), spanL)
         val outCdf = DoubleArray(NUM_BINS)
         var cdfCumSum = 0.0
         for (i in 0 until NUM_BINS) {
@@ -975,7 +973,6 @@ object ImagePipeline {
 
         // --- Compute transfer LUTs and CDF from preview histograms (same as processFromParams) ---
         val L = state.pass1L!!
-        val previewPixelCount = state.pixelCount
 
         // L channel
         val capL = (1.0f - params.lightSmoothing) *
@@ -1032,14 +1029,8 @@ object ImagePipeline {
 
         // Output CDF for zone weights (from preview L data)
         val spanL = (1.0 + whiteL - blackL).toFloat()
-        val lOut = FloatArray(previewPixelCount)
-        for (i in 0 until previewPixelCount) {
-            val lIn = L[i].coerceIn(0f, 1f)
-            val lMapped = interpUniform(lIn, transferL, NUM_BINS)
-            lOut[i] = (blackL.toFloat() + lMapped * spanL).coerceIn(0f, 1f)
-        }
-
-        val outHistL = computeHistogram(lOut)
+        val outHistL =
+            computeTransferredHistogram(L, transferL, blackL.toFloat(), spanL)
         val outCdf = DoubleArray(NUM_BINS)
         var cdfCumSum = 0.0
         for (i in 0 until NUM_BINS) {

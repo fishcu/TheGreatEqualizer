@@ -1,6 +1,7 @@
 package com.thegreatequalizer.app
 
 import android.content.ContentValues
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
@@ -169,11 +170,24 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         shakeDetector.start()
+        maybeStartHiResCrop()
     }
 
     override fun onPause() {
         super.onPause()
         shakeDetector.stop()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level == ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+            invalidateHiResCrop()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        invalidateHiResCrop()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -412,7 +426,10 @@ class MainActivity : AppCompatActivity() {
                 val outBitmap = withContext(gpuDispatcher) {
                     ImagePipeline.processFromParams(state, params, lut, gpu)
                 }
-                if (generation != imageGeneration) return@launch
+                if (generation != imageGeneration) {
+                    outBitmap.recycle()
+                    return@launch
+                }
 
                 val elapsed = System.currentTimeMillis() - startMs
                 Log.i(TAG, "Staged GPU processing took ${elapsed}ms")
@@ -805,7 +822,10 @@ class MainActivity : AppCompatActivity() {
                 val outBitmap = withContext(gpuDispatcher) {
                     ImagePipeline.processFromParams(state, paramsToRender, lut, gpu)
                 }
-                if (imageGenAtStart != imageGeneration) return@launch
+                if (imageGenAtStart != imageGeneration) {
+                    outBitmap.recycle()
+                    return@launch
+                }
                 processedBitmap = outBitmap
                 state.processedBitmap = outBitmap
                 if (!isShowingOriginal) {
@@ -1060,6 +1080,9 @@ class MainActivity : AppCompatActivity() {
                         "[HiResCrop] Overlay applied: source ${cropW}x${cropH}, " +
                             "display ${overlaySize.width}x${overlaySize.height}"
                     )
+                } else {
+                    cropBitmaps.originalBitmap.recycle()
+                    cropBitmaps.processedBitmap.recycle()
                 }
             } catch (error: CancellationException) {
                 throw error
