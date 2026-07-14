@@ -1,6 +1,9 @@
 package com.thegreatequalizer.app
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.util.Log
 import kotlin.math.*
 
@@ -27,6 +30,11 @@ object ImagePipeline {
     private const val TAG = "TheGreatEqualizer"
     const val NUM_BINS = 256
 
+    data class HiResCropResult(
+        val originalBitmap: Bitmap,
+        val processedBitmap: Bitmap
+    )
+
     /**
      * Maximum pixel dimension (longer edge) for processing.
      * Images larger than this are downscaled before the pipeline runs.
@@ -40,7 +48,9 @@ object ImagePipeline {
         originX: Int,
         originY: Int,
         fullImageWidth: Int,
-        fullImageHeight: Int
+        fullImageHeight: Int,
+        coordinateScaleX: Float = 1.0f,
+        coordinateScaleY: Float = 1.0f
     ): GpuPipeline.VignetteRenderParams =
         GpuPipeline.VignetteRenderParams(
             amount = ParameterRanges.vignetteAmountToRender(
@@ -52,6 +62,8 @@ object ImagePipeline {
             rowWidth = rowWidth,
             originX = originX,
             originY = originY,
+            coordinateScaleX = coordinateScaleX,
+            coordinateScaleY = coordinateScaleY,
             fullImageWidth = fullImageWidth,
             fullImageHeight = fullImageHeight
         )
@@ -68,6 +80,8 @@ object ImagePipeline {
             rowWidth = rowWidth,
             originX = 0,
             originY = 0,
+            coordinateScaleX = 1.0f,
+            coordinateScaleY = 1.0f,
             fullImageWidth = fullImageWidth,
             fullImageHeight = fullImageHeight
         )
@@ -926,11 +940,13 @@ object ImagePipeline {
      * @param cropY Top edge in original image pixels
      * @param cropW Width in original image pixels
      * @param cropH Height in original image pixels
+     * @param outputWidth Width of the display-resolution overlay
+     * @param outputHeight Height of the display-resolution overlay
      * @param state Pipeline state with cached preview histograms
      * @param params Current pipeline parameters
      * @param gamutLut Gamut LUT
      * @param gpuPipeline GPU pipeline instance
-     * @return Processed crop bitmap
+     * @return Matching source and processed overlay bitmaps
      */
     fun processHiResCrop(
         originalBitmap: Bitmap,
@@ -938,13 +954,24 @@ object ImagePipeline {
         cropY: Int,
         cropW: Int,
         cropH: Int,
+        outputWidth: Int,
+        outputHeight: Int,
         state: PipelineState,
         params: PipelineParams,
         gamutLut: FloatArray,
         gpuPipeline: GpuPipeline
-    ): Bitmap {
-        val pixelCount = cropW * cropH
-        Log.i(TAG, "[HiResCrop] Crop: ${cropW}x${cropH} at ($cropX,$cropY), $pixelCount px")
+    ): HiResCropResult {
+        require(outputWidth in 1..cropW && outputHeight in 1..cropH) {
+            "Hi-res overlay must be a positive downsample of its source crop"
+        }
+        val pixelCount = outputWidth * outputHeight
+        val coordinateScaleX = cropW.toFloat() / outputWidth.toFloat()
+        val coordinateScaleY = cropH.toFloat() / outputHeight.toFloat()
+        Log.i(
+            TAG,
+            "[HiResCrop] Source ${cropW}x${cropH} at ($cropX,$cropY), " +
+                "overlay ${outputWidth}x$outputHeight, $pixelCount px"
+        )
 
         // --- Compute transfer LUTs and CDF from preview histograms (same as processFromParams) ---
         val L = state.pass1L!!
@@ -1034,9 +1061,25 @@ object ImagePipeline {
             ParameterRanges.tintStrengthToRender(params.highlightTintStrength)
         )
 
-        // --- Extract crop pixels from original bitmap ---
+        // --- Sample only the display-resolution crop from the original bitmap ---
+        val originalCropBitmap =
+            Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
+        Canvas(originalCropBitmap).drawBitmap(
+            originalBitmap,
+            Rect(cropX, cropY, cropX + cropW, cropY + cropH),
+            Rect(0, 0, outputWidth, outputHeight),
+            Paint(Paint.FILTER_BITMAP_FLAG)
+        )
         val cropPixels = IntArray(pixelCount)
-        originalBitmap.getPixels(cropPixels, 0, cropW, cropX, cropY, cropW, cropH)
+        originalCropBitmap.getPixels(
+            cropPixels,
+            0,
+            outputWidth,
+            0,
+            0,
+            outputWidth,
+            outputHeight
+        )
 
         // --- GPU pass 1 (no readback) + pass 2 ---
         gpuPipeline.processPass1NoReadback(
@@ -1044,11 +1087,13 @@ object ImagePipeline {
             pixelCount,
             vignetteRenderParams(
                 params,
-                cropW,
+                outputWidth,
                 cropX,
                 cropY,
                 originalBitmap.width,
-                originalBitmap.height
+                originalBitmap.height,
+                coordinateScaleX,
+                coordinateScaleY
             )
         )
 
@@ -1062,20 +1107,29 @@ object ImagePipeline {
                     params.grainAmount
                 ),
                 size = ParameterRanges.grainSizeToRender(params.grainSize),
-                rowWidth = cropW,
+                rowWidth = outputWidth,
                 originX = cropX,
                 originY = cropY,
-                coordinateScaleX = 1.0f,
-                coordinateScaleY = 1.0f
+                coordinateScaleX = coordinateScaleX,
+                coordinateScaleY = coordinateScaleY
             ),
             pixelCount
         )
 
-        val outBitmap = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
-        outBitmap.setPixels(outPixels, 0, cropW, 0, 0, cropW, cropH)
+        val outBitmap =
+            Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
+        outBitmap.setPixels(
+            outPixels,
+            0,
+            outputWidth,
+            0,
+            0,
+            outputWidth,
+            outputHeight
+        )
 
-        Log.i(TAG, "[HiResCrop] Done: ${cropW}x${cropH}")
-        return outBitmap
+        Log.i(TAG, "[HiResCrop] Done: ${outputWidth}x$outputHeight")
+        return HiResCropResult(originalCropBitmap, outBitmap)
     }
 
     // ---------------------------------------------------------------

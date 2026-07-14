@@ -41,7 +41,10 @@ import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.exp
+import kotlin.math.floor
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
@@ -59,6 +62,11 @@ class MainActivity : AppCompatActivity() {
         val navigationItemId: Int
     )
 
+    private data class OverlaySize(
+        val width: Int,
+        val height: Int
+    )
+
     private enum class GpuStatus {
         INITIALIZING,
         READY,
@@ -68,9 +76,10 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "TheGreatEqualizer"
         private const val AB_DELAY_MS = 100L
-        private const val HIRES_ZOOM_THRESHOLD = 1.5f
+        private const val HIRES_ZOOM_THRESHOLD = 1.0f
         private const val HIRES_DEBOUNCE_MS = 150L
         private const val HIRES_PADDING = 0.2f  // 20% extra on each side
+        private const val MAX_HIRES_OVERLAY_PIXELS = 2_000_000
         private const val MAX_EDIT_HISTORY = 100
         private const val ENABLED_HISTORY_ALPHA = 0.9f
         private const val DISABLED_HISTORY_ALPHA = 0.3f
@@ -124,6 +133,7 @@ class MainActivity : AppCompatActivity() {
     private var hiResCropJob: Job? = null
     private var hiResCropGeneration = 0L
     private var currentHiResBitmap: Bitmap? = null
+    private var currentOriginalHiResBitmap: Bitmap? = null
     private var currentHiResCropRect: RectF? = null
 
     private val pickImage = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
@@ -233,7 +243,7 @@ class MainActivity : AppCompatActivity() {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (isTouchOnImageView(event) && !isTouchOnImageAction(event)) {
-                    val orig = originalBitmap
+                    val orig = pipelineState.originalBitmap
                     val proc = processedBitmap
                     if (orig != null && proc != null) {
                         multiTouchActive = false
@@ -245,6 +255,7 @@ class MainActivity : AppCompatActivity() {
                                 isShowingOriginal = true
                                 imageView.clearOverlay()
                                 updateImageBitmap(orig)
+                                showCachedHiResOverlay(currentOriginalHiResBitmap)
                             }
                         }
                     }
@@ -259,11 +270,7 @@ class MainActivity : AppCompatActivity() {
                     isShowingOriginal = false
                     val bmp = processedBitmap
                     if (bmp != null) updateImageBitmap(bmp)
-                    val hiResBmp = currentHiResBitmap
-                    val hiResRect = currentHiResCropRect
-                    if (hiResBmp != null && hiResRect != null) {
-                        imageView.setOverlay(hiResBmp, hiResRect)
-                    }
+                    showCachedHiResOverlay(currentHiResBitmap)
                 }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
@@ -273,11 +280,7 @@ class MainActivity : AppCompatActivity() {
                     isShowingOriginal = false
                     val bmp = processedBitmap
                     if (bmp != null) updateImageBitmap(bmp)
-                    val hiResBmp = currentHiResBitmap
-                    val hiResRect = currentHiResCropRect
-                    if (hiResBmp != null && hiResRect != null) {
-                        imageView.setOverlay(hiResBmp, hiResRect)
-                    }
+                    showCachedHiResOverlay(currentHiResBitmap)
                 }
                 multiTouchActive = false
             }
@@ -354,7 +357,7 @@ class MainActivity : AppCompatActivity() {
                 pipelineParams = PipelineParams()
                 pendingParams = null
                 renderGeneration++
-                imageView.setImageBitmap(bitmap)
+                imageView.setImageBitmap(null)
                 showImageLoaded()
                 processImage()
             } else {
@@ -394,6 +397,7 @@ class MainActivity : AppCompatActivity() {
                     ImagePipeline.processPass1Only(src, lut, gpu, initialParams)
                 }
                 if (generation != imageGeneration) return@launch
+                imageView.setImageBitmap(state.originalBitmap)
 
                 var params = initialParams
                 params = withContext(Dispatchers.Default) {
@@ -420,6 +424,7 @@ class MainActivity : AppCompatActivity() {
                 imageView.setImageBitmap(outBitmap)
                 notifyFragmentUpdate()
                 updateHistoryButtons()
+                maybeStartHiResCrop()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -825,9 +830,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateImageBitmap(bitmap: Bitmap) {
-        val savedMatrix = imageView.getTransformMatrix()
-        imageView.setImageBitmap(bitmap)
-        imageView.setTransformMatrix(savedMatrix)
+        imageView.setImageBitmapPreservingTransform(bitmap)
     }
 
     private fun previewVignetteRenderParams(
@@ -844,6 +847,8 @@ class MainActivity : AppCompatActivity() {
             rowWidth = state.width,
             originX = 0,
             originY = 0,
+            coordinateScaleX = 1.0f,
+            coordinateScaleY = 1.0f,
             fullImageWidth = state.width,
             fullImageHeight = state.height
         )
@@ -852,18 +857,40 @@ class MainActivity : AppCompatActivity() {
     // Hi-res crop overlay (second rendering track)
     // ---------------------------------------------------------------
 
+    private fun showCachedHiResOverlay(bitmap: Bitmap?) {
+        val cropRect = currentHiResCropRect
+        if (
+            imageView.getZoomScale() >= HIRES_ZOOM_THRESHOLD &&
+            bitmap != null &&
+            cropRect != null
+        ) {
+            imageView.setOverlay(bitmap, cropRect)
+        } else {
+            imageView.clearOverlay()
+        }
+    }
+
     private fun onViewportChanged() {
         // Cancel in-progress render job; keep existing overlay visible until replaced
         cancelHiResCropJob()
+        val gen = ++hiResCropGeneration
 
         // Check if zoomed enough to warrant hi-res
-        if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) return
-        if (!pipelineState.isImageLoaded()) return
-        val orig = originalBitmap ?: return
-        if (maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) return
+        if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) {
+            imageView.clearOverlay()
+            return
+        }
+        if (!pipelineState.isImageLoaded()) {
+            imageView.clearOverlay()
+            return
+        }
+        val orig = originalBitmap
+        if (orig == null || maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+            imageView.clearOverlay()
+            return
+        }
 
         // Debounce: wait for gesture to settle
-        val gen = ++hiResCropGeneration
         hiResCropJob = lifecycleScope.launch {
             delay(HIRES_DEBOUNCE_MS)
             if (gen == hiResCropGeneration) {
@@ -873,13 +900,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeStartHiResCrop() {
-        if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) return
-        if (!pipelineState.isImageLoaded()) return
-        val orig = originalBitmap ?: return
-        if (maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) return
-
         cancelHiResCropJob()
         val gen = ++hiResCropGeneration
+        if (imageView.getZoomScale() < HIRES_ZOOM_THRESHOLD) {
+            imageView.clearOverlay()
+            return
+        }
+        if (!pipelineState.isImageLoaded()) {
+            imageView.clearOverlay()
+            return
+        }
+        val orig = originalBitmap
+        if (orig == null || maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+            imageView.clearOverlay()
+            return
+        }
+
         hiResCropJob = lifecycleScope.launch {
             if (gen == hiResCropGeneration) {
                 startHiResCrop()
@@ -895,11 +931,32 @@ class MainActivity : AppCompatActivity() {
 
     /** Cancel job AND clear cached overlay — for slider changes / new image loads. */
     private fun invalidateHiResCrop() {
-        hiResCropJob?.cancel()
-        hiResCropJob = null
+        cancelHiResCropJob()
+        hiResCropGeneration++
         currentHiResBitmap = null
+        currentOriginalHiResBitmap = null
         currentHiResCropRect = null
         imageView.clearOverlay()
+    }
+
+    private fun boundedOverlaySize(
+        displayedCropRect: RectF,
+        cropW: Int,
+        cropH: Int
+    ): OverlaySize {
+        val desiredWidth =
+            ceil(displayedCropRect.width().toDouble()).toInt().coerceIn(1, cropW)
+        val desiredHeight =
+            ceil(displayedCropRect.height().toDouble()).toInt().coerceIn(1, cropH)
+        val desiredPixels = desiredWidth.toLong() * desiredHeight.toLong()
+        if (desiredPixels <= MAX_HIRES_OVERLAY_PIXELS) {
+            return OverlaySize(desiredWidth, desiredHeight)
+        }
+
+        val scale = sqrt(MAX_HIRES_OVERLAY_PIXELS.toDouble() / desiredPixels.toDouble())
+        val width = floor(desiredWidth * scale).toInt().coerceAtLeast(1)
+        val height = floor(desiredHeight * scale).toInt().coerceAtLeast(1)
+        return OverlaySize(width, height)
     }
 
     private fun startHiResCrop() {
@@ -943,39 +1000,77 @@ class MainActivity : AppCompatActivity() {
             cropX / scaleX, cropY / scaleY,
             cropRight / scaleX, cropBottom / scaleY
         )
+        val displayedCropRect = imageView.getDisplayedImageRect(cropRectInPreview)
+        val overlaySize = boundedOverlaySize(displayedCropRect, cropW, cropH)
 
         val gen = hiResCropGeneration
 
         hiResCropJob = lifecycleScope.launch {
             try {
-                val cropBitmap = withContext(gpuDispatcher) {
-                    val result = ImagePipeline.processHiResCrop(
-                        orig, cropX, cropY, cropW, cropH,
-                        state, params, lut, gpu
-                    )
-                    // Restore preview SSBOs so low-res renders continue to work
-                    val previewPixels = IntArray(state.pixelCount)
-                    previewBm.getPixels(
-                        previewPixels, 0, state.width,
-                        0, 0, state.width, state.height
-                    )
-                    gpu.processPass1(
-                        previewPixels,
-                        state.pixelCount,
-                        previewVignetteRenderParams(state, params)
-                    )
-                    result
+                val cropBitmaps = withContext(gpuDispatcher) {
+                    try {
+                        ImagePipeline.processHiResCrop(
+                            orig,
+                            cropX,
+                            cropY,
+                            cropW,
+                            cropH,
+                            overlaySize.width,
+                            overlaySize.height,
+                            state,
+                            params,
+                            lut,
+                            gpu
+                        )
+                    } finally {
+                        // A crop may fail or be cancelled after changing shared
+                        // SSBOs. Always restore the preview before releasing the
+                        // single-threaded GPU dispatcher.
+                        val previewPixels = IntArray(state.pixelCount)
+                        previewBm.getPixels(
+                            previewPixels,
+                            0,
+                            state.width,
+                            0,
+                            0,
+                            state.width,
+                            state.height
+                        )
+                        gpu.processPass1NoReadback(
+                            previewPixels,
+                            state.pixelCount,
+                            previewVignetteRenderParams(state, params)
+                        )
+                    }
                 }
 
                 // Only apply if still the current generation (no cancel/new render happened)
-                if (gen == hiResCropGeneration && !isShowingOriginal) {
-                    currentHiResBitmap = cropBitmap
+                if (gen == hiResCropGeneration) {
+                    currentHiResBitmap = cropBitmaps.processedBitmap
+                    currentOriginalHiResBitmap = cropBitmaps.originalBitmap
                     currentHiResCropRect = cropRectInPreview
-                    imageView.setOverlay(cropBitmap, cropRectInPreview)
-                    Log.i(TAG, "[HiResCrop] Overlay applied: ${cropW}x${cropH}")
+                    val displayedBitmap = if (isShowingOriginal) {
+                        cropBitmaps.originalBitmap
+                    } else {
+                        cropBitmaps.processedBitmap
+                    }
+                    imageView.setOverlay(displayedBitmap, cropRectInPreview)
+                    Log.i(
+                        TAG,
+                        "[HiResCrop] Overlay applied: source ${cropW}x${cropH}, " +
+                            "display ${overlaySize.width}x${overlaySize.height}"
+                    )
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Hi-res crop render error", e)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (gen == hiResCropGeneration) {
+                    currentHiResBitmap = null
+                    currentOriginalHiResBitmap = null
+                    currentHiResCropRect = null
+                    imageView.clearOverlay()
+                }
+                Log.e(TAG, "Hi-res crop render error", error)
             }
         }
     }

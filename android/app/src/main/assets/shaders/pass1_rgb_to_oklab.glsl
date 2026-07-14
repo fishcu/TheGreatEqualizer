@@ -29,6 +29,7 @@ uniform float uVignetteAmount;
 uniform float uVignetteFalloff;
 uniform int uImageWidth;
 uniform ivec2 uImageOrigin;
+uniform vec2 uImageCoordinateScale;
 uniform ivec2 uFullImageSize;
 
 // ── sRGB EOTF ──
@@ -101,9 +102,10 @@ void main() {
     if (uVignetteAmount > 0.0) {
         int localX = int(idx % uint(uImageWidth));
         int localY = int(idx / uint(uImageWidth));
-        vec2 globalPixel = vec2(
-            uImageOrigin + ivec2(localX, localY)
-        ) + vec2(0.5);
+        vec2 globalPixel =
+            vec2(uImageOrigin)
+            + (vec2(localX, localY) + vec2(0.5))
+                * uImageCoordinateScale;
         vec2 fullImageSize = vec2(uFullImageSize);
         vec2 imageCenter = fullImageSize * 0.5;
         float normalizationRadius =

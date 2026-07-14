@@ -67,6 +67,7 @@ class GpuPipeline {
     private var pass1VignetteFalloffLoc = 0
     private var pass1ImageWidthLoc = 0
     private var pass1ImageOriginLoc = 0
+    private var pass1ImageCoordinateScaleLoc = 0
     private var pass1FullImageSizeLoc = 0
 
     // Pass 2 uniform locations
@@ -112,6 +113,8 @@ class GpuPipeline {
         val rowWidth: Int,
         val originX: Int,
         val originY: Int,
+        val coordinateScaleX: Float,
+        val coordinateScaleY: Float,
         val fullImageWidth: Int,
         val fullImageHeight: Int
     )
@@ -151,6 +154,8 @@ class GpuPipeline {
                 GLES31.glGetUniformLocation(pass1Program, "uVignetteFalloff")
             pass1ImageWidthLoc = GLES31.glGetUniformLocation(pass1Program, "uImageWidth")
             pass1ImageOriginLoc = GLES31.glGetUniformLocation(pass1Program, "uImageOrigin")
+            pass1ImageCoordinateScaleLoc =
+                GLES31.glGetUniformLocation(pass1Program, "uImageCoordinateScale")
             pass1FullImageSizeLoc =
                 GLES31.glGetUniformLocation(pass1Program, "uFullImageSize")
 
@@ -313,10 +318,18 @@ class GpuPipeline {
         require(params.originX >= 0 && params.originY >= 0) {
             "Vignette origin must be non-negative"
         }
+        require(
+            params.coordinateScaleX >= 1.0f &&
+                params.coordinateScaleY >= 1.0f
+        ) {
+            "Vignette coordinate scales must be at least one"
+        }
         val rowCount = pixelCount / params.rowWidth
         require(
-            params.originX + params.rowWidth <= params.fullImageWidth &&
-                params.originY + rowCount <= params.fullImageHeight
+            params.originX + params.rowWidth * params.coordinateScaleX <=
+                params.fullImageWidth + params.coordinateScaleX &&
+                params.originY + rowCount * params.coordinateScaleY <=
+                params.fullImageHeight + params.coordinateScaleY
         ) {
             "Vignette region must lie inside the full image"
         }
@@ -326,6 +339,11 @@ class GpuPipeline {
         GLES20.glUniform1f(pass1VignetteFalloffLoc, params.falloff)
         GLES20.glUniform1i(pass1ImageWidthLoc, params.rowWidth)
         GLES20.glUniform2i(pass1ImageOriginLoc, params.originX, params.originY)
+        GLES20.glUniform2f(
+            pass1ImageCoordinateScaleLoc,
+            params.coordinateScaleX,
+            params.coordinateScaleY
+        )
         GLES20.glUniform2i(
             pass1FullImageSizeLoc,
             params.fullImageWidth,

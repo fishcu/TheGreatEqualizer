@@ -39,6 +39,7 @@ class ZoomableImageView @JvmOverloads constructor(
     private var isMultiTouch = false
     private var resetAnimator: ValueAnimator? = null
     private var doubleTapConsumed = false
+    private var suppressViewportChanged = false
 
     // Hi-res overlay
     private var overlayBitmap: Bitmap? = null
@@ -244,7 +245,9 @@ class ZoomableImageView @JvmOverloads constructor(
         displayMatrix.set(baseMatrix)
         displayMatrix.postConcat(userMatrix)
         imageMatrix = displayMatrix
-        onViewportChanged?.invoke()
+        if (!suppressViewportChanged) {
+            onViewportChanged?.invoke()
+        }
     }
 
     /** Save the current user transform (for A/B bitmap swaps). */
@@ -257,6 +260,18 @@ class ZoomableImageView @JvmOverloads constructor(
         userMatrix.getValues(values)
         currentScale = values[Matrix.MSCALE_X]
         applyMatrix()
+    }
+
+    /** Swap equal-sized preview bitmaps without treating it as a viewport gesture. */
+    fun setImageBitmapPreservingTransform(bitmap: Bitmap) {
+        val savedMatrix = getTransformMatrix()
+        suppressViewportChanged = true
+        try {
+            setImageBitmap(bitmap)
+            setTransformMatrix(savedMatrix)
+        } finally {
+            suppressViewportChanged = false
+        }
     }
 
     /** Current zoom level relative to fit-to-view (1.0 = not zoomed). */
@@ -286,6 +301,13 @@ class ZoomableImageView @JvmOverloads constructor(
         viewRect.bottom = viewRect.bottom.coerceIn(0f, bm.height.toFloat())
 
         return viewRect
+    }
+
+    /** Maps an image-coordinate rectangle to its current on-screen rectangle. */
+    fun getDisplayedImageRect(imageRect: RectF): RectF {
+        val displayedRect = RectF(imageRect)
+        displayMatrix.mapRect(displayedRect)
+        return displayedRect
     }
 
     /** Set or clear the hi-res overlay bitmap. [imageRect] is in image pixel coordinates. */
