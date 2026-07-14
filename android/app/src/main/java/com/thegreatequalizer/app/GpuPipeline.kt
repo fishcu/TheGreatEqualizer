@@ -301,11 +301,11 @@ class GpuPipeline {
         pixelCount: Int,
         params: VignetteRenderParams
     ) {
-        require(params.amount in 0.0f..10.0f) {
-            "Vignette amount must be in [0.0, 10.0]"
+        require(params.amount.isFinite()) {
+            "Vignette amount must be finite"
         }
-        require(params.falloff in 1.0f..10.0f) {
-            "Vignette falloff must be in [1.0, 10.0]"
+        require(params.falloff.isFinite() && params.falloff > 0.0f) {
+            "Vignette falloff must be positive and finite"
         }
         require(params.rowWidth > 0 && pixelCount % params.rowWidth == 0) {
             "Pixel count must contain complete rows"
@@ -349,11 +349,11 @@ class GpuPipeline {
         pixelCount: Int
     ): IntArray {
         check(initialized) { "GpuPipeline not initialized" }
-        require(grainParams.amount in 0.0f..0.15f) {
-            "Grain amount must be in [0.0, 0.15]"
+        require(grainParams.amount.isFinite()) {
+            "Grain amount must be finite"
         }
-        require(grainParams.size in 0.25f..4.0f) {
-            "Grain size must be in [0.25, 4.0]"
+        require(grainParams.size.isFinite() && grainParams.size > 0.0f) {
+            "Grain size must be positive and finite"
         }
         require(grainParams.rowWidth > 0 && pixelCount % grainParams.rowWidth == 0) {
             "Pixel count must contain complete rows"

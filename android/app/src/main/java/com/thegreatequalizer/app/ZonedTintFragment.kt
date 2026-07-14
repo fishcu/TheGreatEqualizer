@@ -25,27 +25,27 @@ class ZonedTintFragment : Fragment() {
 
         // Set initial positions from current params
         val currentParams = (requireActivity() as MainActivity).pipelineParams
-        wheelShadows.setTint(currentParams.shadowTintAngle, currentParams.shadowTintStrength)
-        wheelMidtones.setTint(currentParams.midtoneTintAngle, currentParams.midtoneTintStrength)
-        wheelHighlights.setTint(currentParams.highlightTintAngle, currentParams.highlightTintStrength)
+        wheelShadows.setTint(currentParams.shadowTintHue, currentParams.shadowTintStrength)
+        wheelMidtones.setTint(currentParams.midtoneTintHue, currentParams.midtoneTintStrength)
+        wheelHighlights.setTint(currentParams.highlightTintHue, currentParams.highlightTintStrength)
 
-        bindWheel(wheelShadows, "Shadow tint") { params, angle, strength ->
-            params.copy(shadowTintAngle = angle, shadowTintStrength = strength)
+        bindWheel(wheelShadows, "Shadow tint") { params, hue, strength ->
+            params.copy(shadowTintHue = hue, shadowTintStrength = strength)
         }
-        bindWheel(wheelMidtones, "Midtone tint") { params, angle, strength ->
-            params.copy(midtoneTintAngle = angle, midtoneTintStrength = strength)
+        bindWheel(wheelMidtones, "Midtone tint") { params, hue, strength ->
+            params.copy(midtoneTintHue = hue, midtoneTintStrength = strength)
         }
-        bindWheel(wheelHighlights, "Highlight tint") { params, angle, strength ->
-            params.copy(highlightTintAngle = angle, highlightTintStrength = strength)
+        bindWheel(wheelHighlights, "Highlight tint") { params, hue, strength ->
+            params.copy(highlightTintHue = hue, highlightTintStrength = strength)
         }
     }
 
     /** Called from MainActivity when params change externally (randomize, new image). */
     fun updateFromParams() {
         val params = (activity as? MainActivity)?.pipelineParams ?: return
-        wheelShadows.setTint(params.shadowTintAngle, params.shadowTintStrength)
-        wheelMidtones.setTint(params.midtoneTintAngle, params.midtoneTintStrength)
-        wheelHighlights.setTint(params.highlightTintAngle, params.highlightTintStrength)
+        wheelShadows.setTint(params.shadowTintHue, params.shadowTintStrength)
+        wheelMidtones.setTint(params.midtoneTintHue, params.midtoneTintStrength)
+        wheelHighlights.setTint(params.highlightTintHue, params.highlightTintStrength)
     }
 
     private fun bindWheel(
@@ -56,8 +56,8 @@ class ZonedTintFragment : Fragment() {
         val main = requireActivity() as MainActivity
         wheel.onInteractionStart = { main.beginParameterEdit(label) }
         wheel.onDoubleTapReset = { main.mergeActiveEditWithPrevious() }
-        wheel.onTintChanged = { angle, strength ->
-            main.previewParameterEdit(transform(main.pipelineParams, angle, strength))
+        wheel.onTintChanged = { hue, strength ->
+            main.previewParameterEdit(transform(main.pipelineParams, hue, strength))
         }
         wheel.onInteractionEnd = { main.commitParameterEdit() }
     }

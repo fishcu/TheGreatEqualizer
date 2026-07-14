@@ -13,7 +13,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.animation.DecelerateInterpolator
-import android.widget.ImageView
+import androidx.appcompat.widget.AppCompatImageView
 
 /**
  * ImageView subclass with matrix-based fit-center display,
@@ -24,7 +24,7 @@ class ZoomableImageView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : ImageView(context, attrs, defStyleAttr) {
+) : AppCompatImageView(context, attrs, defStyleAttr) {
 
     private val baseMatrix = Matrix()
     private val userMatrix = Matrix()

@@ -40,46 +40,7 @@ class LightFragment : Fragment() {
     private val onThreshold = mutableMapOf<Int, Float?>()
     private var settingValue = false
 
-    companion object {
-        private val PI_4 = (Math.PI / 4).toFloat()
-
-        // Shape slider ranges: min, neutral, max
-        private val SHADOWS_MIN = 0.01f
-        private val SHADOWS_NEUTRAL = PI_4
-        private val SHADOWS_MAX = 1.37f
-
-        private val HIGHLIGHTS_MIN = 0.20f
-        private val HIGHLIGHTS_NEUTRAL = PI_4
-        private val HIGHLIGHTS_MAX = 1.56f
-
-        private val MIDBAL_MIN = 0.01f
-        private val MIDBAL_NEUTRAL = 0.5f
-        private val MIDBAL_MAX = 0.99f
-
-        private val MIDCON_MIN = 0.10f
-        private val MIDCON_NEUTRAL = PI_4
-        private val MIDCON_MAX = 1.25f
-
-        // Position [0,1] -> internal value
-        fun posToValue(pos: Float, min: Float, neutral: Float, max: Float): Float {
-            return if (pos <= 0.5f) {
-                min + (neutral - min) * (pos / 0.5f)
-            } else {
-                neutral + (max - neutral) * ((pos - 0.5f) / 0.5f)
-            }
-        }
-
-        // Internal value -> position [0,1]
-        fun valueToPos(value: Float, min: Float, neutral: Float, max: Float): Float {
-            return if (value <= neutral) {
-                0.5f * (value - min) / (neutral - min)
-            } else {
-                0.5f + 0.5f * (value - neutral) / (max - neutral)
-            }
-        }
-    }
-
-    // Neutral defaults in slider-position space (all shape sliders neutral at 0.5)
+    // Neutral defaults in canonical control space.
     private val neutralDefaults by lazy {
         mapOf(
             R.id.slider_light_smoothing to 0.1f,
@@ -107,6 +68,10 @@ class LightFragment : Fragment() {
         sliderMidtoneContrast = view.findViewById(R.id.slider_light_midtone_contrast)
         sliderBlacks = view.findViewById(R.id.slider_light_blacks)
         sliderWhites = view.findViewById(R.id.slider_light_whites)
+        sliderBlacks.valueFrom = ParameterRanges.LIFT_MIN
+        sliderBlacks.valueTo = ParameterRanges.LIFT_MAX
+        sliderWhites.valueFrom = ParameterRanges.GAIN_MIN
+        sliderWhites.valueTo = ParameterRanges.GAIN_MAX
 
         valueSmoothing = view.findViewById(R.id.value_light_smoothing)
         valueShadows = view.findViewById(R.id.value_light_shadows)
@@ -123,8 +88,8 @@ class LightFragment : Fragment() {
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueSmoothing.text = fmt(v)
             if (fromUser) {
-                if (BuildConfig.DEBUG) Log.d("SmoothingDebug", "L notifyChanged: lightStrength=${1.0f - v}")
-                notifyChanged { it.copy(lightStrength = 1.0f - v) }
+                if (BuildConfig.DEBUG) Log.d("SmoothingDebug", "L notifyChanged: lightSmoothing=$v")
+                notifyChanged { it.copy(lightSmoothing = v) }
             }
             prevValues[slider.id] = v
         }
@@ -132,42 +97,42 @@ class LightFragment : Fragment() {
             if (settingValue) return@addOnChangeListener
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueShadows.text = fmt(v)
-            if (fromUser) notifyChanged { it.copy(lightShadows = posToValue(v, SHADOWS_MIN, SHADOWS_NEUTRAL, SHADOWS_MAX)) }
+            if (fromUser) notifyChanged { it.copy(lightShadows = v) }
             prevValues[slider.id] = v
         }
         sliderHighlights.addOnChangeListener { slider, value, fromUser ->
             if (settingValue) return@addOnChangeListener
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueHighlights.text = fmt(v)
-            if (fromUser) notifyChanged { it.copy(lightHighlights = posToValue(v, HIGHLIGHTS_MIN, HIGHLIGHTS_NEUTRAL, HIGHLIGHTS_MAX)) }
+            if (fromUser) notifyChanged { it.copy(lightHighlights = v) }
             prevValues[slider.id] = v
         }
         sliderMidtoneBalance.addOnChangeListener { slider, value, fromUser ->
             if (settingValue) return@addOnChangeListener
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueMidtoneBalance.text = fmt(v)
-            if (fromUser) notifyChanged { it.copy(lightMidtoneBalance = posToValue(v, MIDBAL_MIN, MIDBAL_NEUTRAL, MIDBAL_MAX)) }
+            if (fromUser) notifyChanged { it.copy(lightMidtoneBalance = v) }
             prevValues[slider.id] = v
         }
         sliderMidtoneContrast.addOnChangeListener { slider, value, fromUser ->
             if (settingValue) return@addOnChangeListener
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueMidtoneContrast.text = fmt(v)
-            if (fromUser) notifyChanged { it.copy(lightMidtoneContrast = posToValue(v, MIDCON_MIN, MIDCON_NEUTRAL, MIDCON_MAX)) }
+            if (fromUser) notifyChanged { it.copy(lightMidtoneContrast = v) }
             prevValues[slider.id] = v
         }
         sliderBlacks.addOnChangeListener { slider, value, fromUser ->
             if (settingValue) return@addOnChangeListener
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueBlacks.text = fmt(v)
-            if (fromUser) notifyChanged { it.copy(lightBlacks = v) }
+            if (fromUser) notifyChanged { it.copy(lightLift = v) }
             prevValues[slider.id] = v
         }
         sliderWhites.addOnChangeListener { slider, value, fromUser ->
             if (settingValue) return@addOnChangeListener
             val v = if (fromUser) checkHapticAndSnap(slider, value) else value
             valueWhites.text = fmt(v)
-            if (fromUser) notifyChanged { it.copy(lightWhites = v) }
+            if (fromUser) notifyChanged { it.copy(lightGain = v) }
             prevValues[slider.id] = v
         }
 
@@ -246,13 +211,13 @@ class LightFragment : Fragment() {
     private fun notifyChangedForSlider(slider: TickMarkSlider) {
         val v = slider.value
         when (slider.id) {
-            R.id.slider_light_smoothing -> notifyChanged { it.copy(lightStrength = 1.0f - v) }
-            R.id.slider_light_shadows -> notifyChanged { it.copy(lightShadows = posToValue(v, SHADOWS_MIN, SHADOWS_NEUTRAL, SHADOWS_MAX)) }
-            R.id.slider_light_highlights -> notifyChanged { it.copy(lightHighlights = posToValue(v, HIGHLIGHTS_MIN, HIGHLIGHTS_NEUTRAL, HIGHLIGHTS_MAX)) }
-            R.id.slider_light_midtone_balance -> notifyChanged { it.copy(lightMidtoneBalance = posToValue(v, MIDBAL_MIN, MIDBAL_NEUTRAL, MIDBAL_MAX)) }
-            R.id.slider_light_midtone_contrast -> notifyChanged { it.copy(lightMidtoneContrast = posToValue(v, MIDCON_MIN, MIDCON_NEUTRAL, MIDCON_MAX)) }
-            R.id.slider_light_blacks -> notifyChanged { it.copy(lightBlacks = v) }
-            R.id.slider_light_whites -> notifyChanged { it.copy(lightWhites = v) }
+            R.id.slider_light_smoothing -> notifyChanged { it.copy(lightSmoothing = v) }
+            R.id.slider_light_shadows -> notifyChanged { it.copy(lightShadows = v) }
+            R.id.slider_light_highlights -> notifyChanged { it.copy(lightHighlights = v) }
+            R.id.slider_light_midtone_balance -> notifyChanged { it.copy(lightMidtoneBalance = v) }
+            R.id.slider_light_midtone_contrast -> notifyChanged { it.copy(lightMidtoneContrast = v) }
+            R.id.slider_light_blacks -> notifyChanged { it.copy(lightLift = v) }
+            R.id.slider_light_whites -> notifyChanged { it.copy(lightGain = v) }
         }
     }
 
@@ -325,23 +290,14 @@ class LightFragment : Fragment() {
             R.id.slider_light_highlights -> fitted.lightHighlights
             R.id.slider_light_midtone_balance -> fitted.lightMidtoneBalance
             R.id.slider_light_midtone_contrast -> fitted.lightMidtoneContrast
-            R.id.slider_light_blacks -> fitted.lightBlacks
-            R.id.slider_light_whites -> fitted.lightWhites
+            R.id.slider_light_blacks -> fitted.lightLift
+            R.id.slider_light_whites -> fitted.lightGain
             else -> null
         }
     }
 
-    /** Get fitted value converted to slider position space */
     private fun getFittedPos(sliderId: Int): Float? {
-        val v = getFittedValue(sliderId) ?: return null
-        return when (sliderId) {
-            R.id.slider_light_shadows -> valueToPos(v, SHADOWS_MIN, SHADOWS_NEUTRAL, SHADOWS_MAX)
-            R.id.slider_light_highlights -> valueToPos(v, HIGHLIGHTS_MIN, HIGHLIGHTS_NEUTRAL, HIGHLIGHTS_MAX)
-            R.id.slider_light_midtone_balance -> valueToPos(v, MIDBAL_MIN, MIDBAL_NEUTRAL, MIDBAL_MAX)
-            R.id.slider_light_midtone_contrast -> valueToPos(v, MIDCON_MIN, MIDCON_NEUTRAL, MIDCON_MAX)
-            // Blacks/Whites: no mapping, raw value IS slider position
-            else -> v
-        }
+        return getFittedValue(sliderId)
     }
 
     private fun updateTickMarks() {
@@ -362,15 +318,15 @@ class LightFragment : Fragment() {
     }
 
     private fun setSliderValues(params: PipelineParams) {
-        if (BuildConfig.DEBUG) Log.d("SmoothingDebug", "L setSliderValues: lightStrength=${params.lightStrength}")
+        if (BuildConfig.DEBUG) Log.d("SmoothingDebug", "L setSliderValues: lightSmoothing=${params.lightSmoothing}")
         settingValue = true
-        sliderSmoothing.value = (1.0f - params.lightStrength).coerceIn(sliderSmoothing.valueFrom, sliderSmoothing.valueTo)
-        sliderShadows.value = valueToPos(params.lightShadows, SHADOWS_MIN, SHADOWS_NEUTRAL, SHADOWS_MAX).coerceIn(0f, 1f)
-        sliderHighlights.value = valueToPos(params.lightHighlights, HIGHLIGHTS_MIN, HIGHLIGHTS_NEUTRAL, HIGHLIGHTS_MAX).coerceIn(0f, 1f)
-        sliderMidtoneBalance.value = valueToPos(params.lightMidtoneBalance, MIDBAL_MIN, MIDBAL_NEUTRAL, MIDBAL_MAX).coerceIn(0f, 1f)
-        sliderMidtoneContrast.value = valueToPos(params.lightMidtoneContrast, MIDCON_MIN, MIDCON_NEUTRAL, MIDCON_MAX).coerceIn(0f, 1f)
-        sliderBlacks.value = params.lightBlacks.coerceIn(sliderBlacks.valueFrom, sliderBlacks.valueTo)
-        sliderWhites.value = params.lightWhites.coerceIn(sliderWhites.valueFrom, sliderWhites.valueTo)
+        sliderSmoothing.value = params.lightSmoothing.coerceIn(sliderSmoothing.valueFrom, sliderSmoothing.valueTo)
+        sliderShadows.value = params.lightShadows.coerceIn(0f, 1f)
+        sliderHighlights.value = params.lightHighlights.coerceIn(0f, 1f)
+        sliderMidtoneBalance.value = params.lightMidtoneBalance.coerceIn(0f, 1f)
+        sliderMidtoneContrast.value = params.lightMidtoneContrast.coerceIn(0f, 1f)
+        sliderBlacks.value = params.lightLift.coerceIn(sliderBlacks.valueFrom, sliderBlacks.valueTo)
+        sliderWhites.value = params.lightGain.coerceIn(sliderWhites.valueFrom, sliderWhites.valueTo)
         settingValue = false
 
         // Update text labels (listeners were suppressed by settingValue guard)

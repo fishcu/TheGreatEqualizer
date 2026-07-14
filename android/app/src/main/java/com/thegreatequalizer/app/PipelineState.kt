@@ -16,7 +16,7 @@ class PipelineState {
     var fullHeight: Int = 0
     var pixelCount: Int = 0
     var vignetteAmount: Float = 0.0f
-    var vignetteFalloff: Float = 5.0f
+    var vignetteFalloff: Float = ParameterRanges.DEFAULT_VIGNETTE_FALLOFF
 
     // Immutable pre-vignette histograms used for fitting and equalization.
     var rawHistL: DoubleArray? = null

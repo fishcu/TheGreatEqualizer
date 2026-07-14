@@ -29,13 +29,13 @@ class ColorWheelView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 
-    var onTintChanged: ((angle: Float, strength: Float) -> Unit)? = null
+    var onTintChanged: ((hue: Float, strength: Float) -> Unit)? = null
     var onInteractionStart: (() -> Unit)? = null
     var onInteractionEnd: (() -> Unit)? = null
     var onDoubleTapReset: (() -> Unit)? = null
 
-    /** Max strength value corresponding to the edge of the disc. */
-    var maxStrength: Float = 0.25f
+    /** Canonical strength corresponding to the edge of the disc. */
+    var maxStrength: Float = 1.0f
 
     // Current selection in polar coords (OKLab convention: CCW from east)
     private var currentAngle: Float = 0f      // radians [0, 2π]
@@ -85,13 +85,13 @@ class ColorWheelView @JvmOverloads constructor(
                 doubleTapConsumed = true
                 currentStrength = 0f
                 invalidate()
-                onTintChanged?.invoke(currentAngle, currentStrength)
+                onTintChanged?.invoke(currentAngle / TWO_PI, currentStrength)
                 return true
             }
         })
 
-    fun setTint(angle: Float, strength: Float) {
-        currentAngle = angle
+    fun setTint(hue: Float, strength: Float) {
+        currentAngle = ParameterRanges.hueToRadians(hue)
         currentStrength = strength.coerceIn(0f, maxStrength)
         invalidate()
     }
@@ -145,7 +145,6 @@ class ColorWheelView @JvmOverloads constructor(
 
         // Overlay the radial white fade on top
         discPaint.shader = radialShader
-        discPaint.blendMode = null
         canvas.drawCircle(cx, cy, r, discPaint)
 
         discBitmap = bmp
@@ -243,7 +242,7 @@ class ColorWheelView @JvmOverloads constructor(
             if (fraction < snapThreshold) {
                 currentStrength = 0f
                 invalidate()
-                onTintChanged?.invoke(currentAngle, currentStrength)
+                onTintChanged?.invoke(currentAngle / TWO_PI, currentStrength)
                 return
             }
             stickyAtCenter = false
@@ -253,7 +252,7 @@ class ColorWheelView @JvmOverloads constructor(
             currentStrength = 0f
             triggerHaptic()
             invalidate()
-            onTintChanged?.invoke(currentAngle, currentStrength)
+            onTintChanged?.invoke(currentAngle / TWO_PI, currentStrength)
             return
         }
 
@@ -268,7 +267,7 @@ class ColorWheelView @JvmOverloads constructor(
         currentAngle = (TWO_PI - screenAngle) % TWO_PI
 
         invalidate()
-        onTintChanged?.invoke(currentAngle, currentStrength)
+        onTintChanged?.invoke(currentAngle / TWO_PI, currentStrength)
     }
 
     @Suppress("DEPRECATION")

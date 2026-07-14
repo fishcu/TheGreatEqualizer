@@ -16,9 +16,11 @@ class FxFragment : Fragment() {
 
     companion object {
         private const val DEFAULT_VIGNETTE_AMOUNT = 0.0f
-        private const val DEFAULT_VIGNETTE_FALLOFF = 5.0f
+        private const val DEFAULT_VIGNETTE_FALLOFF =
+            ParameterRanges.DEFAULT_VIGNETTE_FALLOFF
         private const val DEFAULT_GRAIN_AMOUNT = 0.0f
-        private const val DEFAULT_GRAIN_SIZE = 1.25f
+        private const val DEFAULT_GRAIN_SIZE =
+            ParameterRanges.DEFAULT_GRAIN_SIZE
         private const val SNAP_EPSILON_FRACTION = 0.015f
     }
 
@@ -37,7 +39,7 @@ class FxFragment : Fragment() {
         control * control
 
     private fun grainAmountToControl(amount: Float): Float =
-        kotlin.math.sqrt(amount)
+        kotlin.math.sqrt(amount.coerceIn(0.0f, 1.0f))
 
     override fun onCreateView(
         inflater: LayoutInflater,

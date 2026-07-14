@@ -87,6 +87,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fabRedo: FloatingActionButton
     private lateinit var controlsPanel: View
     private lateinit var bottomNav: BottomNavigationView
+    private lateinit var presetRepository: PresetRepository
     private var currentNavItemId: Int = R.id.nav_light
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
@@ -115,6 +116,7 @@ class MainActivity : AppCompatActivity() {
     private var isShowingOriginal = false
     private var multiTouchActive = false
     private var abDelayJob: Job? = null
+    var selectedPresetName: String? = null
 
     private lateinit var shakeDetector: ShakeDetector
 
@@ -131,6 +133,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        presetRepository = PresetRepository(this)
         bindViews()
 
         shakeDetector = ShakeDetector(this) { runOnUiThread { randomizeParams("Shake randomize") } }
@@ -210,6 +213,7 @@ class MainActivity : AppCompatActivity() {
                 R.id.nav_color -> ColorFragment()
                 R.id.nav_zoned_tint -> ZonedTintFragment()
                 R.id.nav_fx -> FxFragment()
+                R.id.nav_presets -> PresetsFragment()
                 else -> return@setOnItemSelectedListener false
             }
             supportFragmentManager.beginTransaction()
@@ -432,7 +436,49 @@ class MainActivity : AppCompatActivity() {
             is ColorFragment -> currentFragment.updateFromParams()
             is ZonedTintFragment -> currentFragment.updateFromParams()
             is FxFragment -> currentFragment.updateFromParams()
+            is PresetsFragment -> currentFragment.refreshState()
         }
+    }
+
+    val presets: List<Preset>
+        get() = presetRepository.presets
+
+    fun findPreset(name: String): Preset? =
+        presetRepository.findByName(name)
+
+    fun savePreset(preset: Preset) {
+        presetRepository.save(preset)
+    }
+
+    fun deletePreset(name: String) {
+        presetRepository.delete(name)
+    }
+
+    fun movePreset(fromIndex: Int, toIndex: Int) {
+        presetRepository.move(fromIndex, toIndex)
+    }
+
+    fun isImageLoaded(): Boolean = pipelineState.isImageLoaded()
+
+    fun presetBaseline(): PipelineParams =
+        pipelineState.fittedParams
+            ?: error("Preset baseline requires a loaded image")
+
+    fun applyPreset(name: String) {
+        check(pipelineState.isImageLoaded()) {
+            "Applying a preset requires a loaded image"
+        }
+        val preset = presetRepository.findByName(name)
+            ?: error("Unknown preset: $name")
+        val merged = PresetSettingCatalog.applyPreset(
+            pipelineParams,
+            preset
+        )
+        applyParameterEdit(
+            "Preset: ${preset.name}",
+            merged,
+            R.id.nav_presets
+        )
     }
 
     private fun randomizeParams(label: String) {
@@ -440,8 +486,6 @@ class MainActivity : AppCompatActivity() {
         val rng = java.util.Random()
         val defaults = PipelineParams()
         val fitted = pipelineState.fittedParams ?: return
-        val pi = Math.PI.toFloat()
-        val twoPi = (2.0 * Math.PI).toFloat()
 
         fun gaussian(center: Float, sd: Float, min: Float, max: Float): Float =
             (center + rng.nextGaussian().toFloat() * sd).coerceIn(min, max)
@@ -459,77 +503,157 @@ class MainActivity : AppCompatActivity() {
             return sample
         }
 
-        fun fittedParam(center: Float, name: String, sd: Float): Float {
-            val bounds = FitParams.PARAM_BOUNDS[name]!!
-            return gaussian(
-                center,
+        fun shapeParam(
+            center: Float,
+            range: ParameterRanges.ShapeRange,
+            sd: Float
+        ): Float {
+            val rawCenter = ParameterRanges.controlToShape(center, range)
+            val rawValue = gaussian(
+                rawCenter,
                 sd,
-                bounds.first.toFloat(),
-                bounds.second.toFloat()
+                range.min,
+                range.max
             )
+            return ParameterRanges.shapeToControl(rawValue, range)
         }
 
-        fun angleParam(center: Float, name: String): Float =
-            fittedParam(center, name, 0.15f * (pi / 2))
+        fun angleParam(
+            center: Float,
+            range: ParameterRanges.ShapeRange
+        ): Float =
+            shapeParam(
+                center,
+                range,
+                0.15f * (Math.PI / 2.0).toFloat()
+            )
 
         val newParams = fitted.copy(
             // Light tab — randomize around the per-image fit
-            lightStrength = 1.0f - truncatedGaussian(
-                1.0f - fitted.lightStrength,
+            lightSmoothing = truncatedGaussian(
+                fitted.lightSmoothing,
                 0.15f,
                 0.0f,
                 1.0f
             ),
-            lightShadows = angleParam(fitted.lightShadows, "t"),
-            lightHighlights = angleParam(fitted.lightHighlights, "s"),
-            lightMidtoneBalance = fittedParam(
+            lightShadows = angleParam(
+                fitted.lightShadows,
+                ParameterRanges.TOE
+            ),
+            lightHighlights = angleParam(
+                fitted.lightHighlights,
+                ParameterRanges.SHOULDER
+            ),
+            lightMidtoneBalance = shapeParam(
                 fitted.lightMidtoneBalance,
-                "c",
+                ParameterRanges.BALANCE,
                 0.15f
             ),
             lightMidtoneContrast = angleParam(
                 fitted.lightMidtoneContrast,
-                "g"
+                ParameterRanges.GAMMA
             ),
-            lightBlacks = gaussian(fitted.lightBlacks, 0.15f, -1f, 1f),
-            lightWhites = gaussian(fitted.lightWhites, 0.15f, -1f, 1f),
+            lightLift = gaussian(
+                fitted.lightLift,
+                0.15f,
+                ParameterRanges.LIFT_MIN,
+                ParameterRanges.LIFT_MAX
+            ),
+            lightGain = gaussian(
+                fitted.lightGain,
+                0.15f,
+                ParameterRanges.GAIN_MIN,
+                ParameterRanges.GAIN_MAX
+            ),
 
             // Color tab — randomize around the per-image fit
-            colorStrength = 1.0f - truncatedGaussian(
-                1.0f - fitted.colorStrength,
+            colorSmoothing = truncatedGaussian(
+                fitted.colorSmoothing,
                 0.15f,
                 0.0f,
                 1.0f
             ),
-            colorMutedColors = angleParam(fitted.colorMutedColors, "t"),
-            colorVividColors = angleParam(fitted.colorVividColors, "s"),
-            colorSaturationBalance = fittedParam(
+            colorMutedColors = angleParam(
+                fitted.colorMutedColors,
+                ParameterRanges.TOE
+            ),
+            colorVividColors = angleParam(
+                fitted.colorVividColors,
+                ParameterRanges.SHOULDER
+            ),
+            colorSaturationBalance = shapeParam(
                 fitted.colorSaturationBalance,
-                "c",
+                ParameterRanges.BALANCE,
                 0.15f
             ),
-            colorVibrancy = angleParam(fitted.colorVibrancy, "g"),
-            colorBlacks = gaussian(fitted.colorBlacks, 0.15f, -1f, 1f),
-            colorWhites = gaussian(fitted.colorWhites, 0.15f, -1f, 1f),
+            colorVibrancy = angleParam(
+                fitted.colorVibrancy,
+                ParameterRanges.GAMMA
+            ),
+            colorLift = gaussian(
+                fitted.colorLift,
+                0.15f,
+                ParameterRanges.LIFT_MIN,
+                ParameterRanges.LIFT_MAX
+            ),
+            colorGain = gaussian(
+                fitted.colorGain,
+                0.15f,
+                ParameterRanges.GAIN_MIN,
+                ParameterRanges.GAIN_MAX
+            ),
 
-            // Zoned Tint — uniform angle, subtle strength
-            shadowTintAngle = Random.nextFloat() * twoPi,
-            shadowTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
-            midtoneTintAngle = Random.nextFloat() * twoPi,
-            midtoneTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
-            highlightTintAngle = Random.nextFloat() * twoPi,
-            highlightTintStrength = abs(rng.nextGaussian().toFloat() * 0.08f).coerceIn(0f, 0.25f),
+            // Zoned Tint — uniform hue, subtle strength
+            shadowTintHue = Random.nextFloat(),
+            shadowTintStrength = (
+                abs(rng.nextGaussian().toFloat() * 0.08f) /
+                    ParameterRanges.TINT_STRENGTH_MAX
+            ).coerceIn(0.0f, 1.0f),
+            midtoneTintHue = Random.nextFloat(),
+            midtoneTintStrength = (
+                abs(rng.nextGaussian().toFloat() * 0.08f) /
+                    ParameterRanges.TINT_STRENGTH_MAX
+            ).coerceIn(0.0f, 1.0f),
+            highlightTintHue = Random.nextFloat(),
+            highlightTintStrength = (
+                abs(rng.nextGaussian().toFloat() * 0.08f) /
+                    ParameterRanges.TINT_STRENGTH_MAX
+            ).coerceIn(0.0f, 1.0f),
 
             // Vignette — exposure attenuation with varied radial falloff
-            vignetteAmount = abs(rng.nextGaussian().toFloat() * 0.75f).coerceIn(0f, 10f),
-            vignetteFalloff = gaussian(defaults.vignetteFalloff, 1.5f, 1f, 10f),
+            vignetteAmount = (
+                abs(rng.nextGaussian().toFloat() * 0.75f) /
+                    ParameterRanges.VIGNETTE_AMOUNT_MAX
+            ).coerceIn(0.0f, 1.0f),
+            vignetteFalloff = ParameterRanges.vignetteFalloffFromRender(
+                gaussian(
+                    ParameterRanges.vignetteFalloffToRender(
+                        defaults.vignetteFalloff
+                    ),
+                    1.5f,
+                    ParameterRanges.VIGNETTE_FALLOFF_MIN,
+                    ParameterRanges.VIGNETTE_FALLOFF_MAX
+                )
+            ),
 
             // Grain — half-normal amount and log-normal apparent size
-            grainAmount = abs(rng.nextGaussian().toFloat() * 0.04f).coerceIn(0f, 0.15f),
-            grainSize = (
-                defaults.grainSize * exp(rng.nextGaussian() * 0.7).toFloat()
-            ).coerceIn(0.25f, 4.0f)
+            grainAmount = ParameterRanges.grainAmountFromRender(
+                abs(rng.nextGaussian().toFloat() * 0.04f).coerceIn(
+                    0.0f,
+                    ParameterRanges.GRAIN_AMOUNT_MAX
+                )
+            ),
+            grainSize = ParameterRanges.grainSizeFromRender(
+                (
+                    ParameterRanges.grainSizeToRender(defaults.grainSize) *
+                        exp(rng.nextGaussian() * 0.7).toFloat()
+                ).coerceIn(
+                    ParameterRanges.GRAIN_SIZE_MIN,
+                    ParameterRanges.GRAIN_SIZE_MAX
+                )
+            )
         )
+        ParameterRanges.requireWithinUiBounds(newParams)
 
         // Haptic feedback
         @Suppress("DEPRECATION")
@@ -642,6 +766,7 @@ class MainActivity : AppCompatActivity() {
      * this without touching history; committed edits record their boundary.
      */
     private fun renderParams(params: PipelineParams) {
+        ParameterRanges.requireMathematicallySafe(params)
         pipelineParams = params
         if (gpuStatus != GpuStatus.READY) return
         val lut = gamutLut
@@ -706,8 +831,12 @@ class MainActivity : AppCompatActivity() {
         params: PipelineParams
     ): GpuPipeline.VignetteRenderParams =
         GpuPipeline.VignetteRenderParams(
-            amount = params.vignetteAmount,
-            falloff = params.vignetteFalloff,
+            amount = ParameterRanges.vignetteAmountToRender(
+                params.vignetteAmount
+            ),
+            falloff = ParameterRanges.vignetteFalloffToRender(
+                params.vignetteFalloff
+            ),
             rowWidth = state.width,
             originX = 0,
             originY = 0,

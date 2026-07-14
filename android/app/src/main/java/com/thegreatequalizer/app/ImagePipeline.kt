@@ -43,8 +43,12 @@ object ImagePipeline {
         fullImageHeight: Int
     ): GpuPipeline.VignetteRenderParams =
         GpuPipeline.VignetteRenderParams(
-            amount = params.vignetteAmount,
-            falloff = params.vignetteFalloff,
+            amount = ParameterRanges.vignetteAmountToRender(
+                params.vignetteAmount
+            ),
+            falloff = ParameterRanges.vignetteFalloffToRender(
+                params.vignetteFalloff
+            ),
             rowWidth = rowWidth,
             originX = originX,
             originY = originY,
@@ -60,7 +64,7 @@ object ImagePipeline {
     ): GpuPipeline.VignetteRenderParams =
         GpuPipeline.VignetteRenderParams(
             amount = 0.0f,
-            falloff = falloff,
+            falloff = ParameterRanges.vignetteFalloffToRender(falloff),
             rowWidth = rowWidth,
             originX = 0,
             originY = 0,
@@ -607,32 +611,58 @@ object ImagePipeline {
         val height = state.height
 
         // --- L channel ---
-        val capL = params.lightStrength * (state.rawHistL!!.maxOrNull() ?: 0.0)
+        val capL = (1.0f - params.lightSmoothing) *
+            (state.rawHistL!!.maxOrNull() ?: 0.0)
         val cappedHistL = capHistogram(state.rawHistL!!, capL)
-        val blackL = params.lightBlacks.toDouble()
-        val whiteL = params.lightWhites.toDouble()
+        val blackL = params.lightLift.toDouble()
+        val whiteL = params.lightGain.toDouble()
 
         val transferL = buildTransferLutWithEdges(
             cappedHistL,
-            params.lightShadows.toDouble(),
-            params.lightHighlights.toDouble(),
-            params.lightMidtoneBalance.toDouble(),
-            params.lightMidtoneContrast.toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightShadows,
+                ParameterRanges.TOE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightHighlights,
+                ParameterRanges.SHOULDER
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightMidtoneBalance,
+                ParameterRanges.BALANCE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightMidtoneContrast,
+                ParameterRanges.GAMMA
+            ).toDouble(),
             blackL, whiteL
         )
 
         // --- C channel ---
-        val capC = params.colorStrength * (state.rawHistC!!.maxOrNull() ?: 0.0)
+        val capC = (1.0f - params.colorSmoothing) *
+            (state.rawHistC!!.maxOrNull() ?: 0.0)
         val cappedHistC = capHistogram(state.rawHistC!!, capC)
 
         val transferC = buildTransferLutWithEdges(
             cappedHistC,
-            params.colorMutedColors.toDouble(),
-            params.colorVividColors.toDouble(),
-            params.colorSaturationBalance.toDouble(),
-            params.colorVibrancy.toDouble(),
-            params.colorBlacks.toDouble(),
-            params.colorWhites.toDouble()
+            ParameterRanges.controlToShape(
+                params.colorMutedColors,
+                ParameterRanges.TOE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorVividColors,
+                ParameterRanges.SHOULDER
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorSaturationBalance,
+                ParameterRanges.BALANCE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorVibrancy,
+                ParameterRanges.GAMMA
+            ).toDouble(),
+            params.colorLift.toDouble(),
+            params.colorGain.toDouble()
         )
 
         // --- Build output CDF for zone weights ---
@@ -659,18 +689,23 @@ object ImagePipeline {
 
         // --- GPU pass 2 ---
         val chromaParams = floatArrayOf(
-            params.shadowTintAngle, params.shadowTintStrength,
-            params.midtoneTintAngle, params.midtoneTintStrength,
-            params.highlightTintAngle, params.highlightTintStrength
+            ParameterRanges.hueToRadians(params.shadowTintHue),
+            ParameterRanges.tintStrengthToRender(params.shadowTintStrength),
+            ParameterRanges.hueToRadians(params.midtoneTintHue),
+            ParameterRanges.tintStrengthToRender(params.midtoneTintStrength),
+            ParameterRanges.hueToRadians(params.highlightTintHue),
+            ParameterRanges.tintStrengthToRender(params.highlightTintStrength)
         )
         val outPixels = gpuPipeline.processPass2(
             transferL, transferC, cdfValuesFloat,
             blackL.toFloat(), whiteL.toFloat(),
-            params.colorBlacks, params.colorWhites,
+            params.colorLift, params.colorGain,
             chromaParams,
             GpuPipeline.GrainRenderParams(
-                amount = params.grainAmount,
-                size = params.grainSize,
+                amount = ParameterRanges.grainAmountToRender(
+                    params.grainAmount
+                ),
+                size = ParameterRanges.grainSizeToRender(params.grainSize),
                 rowWidth = width,
                 originX = 0,
                 originY = 0,
@@ -720,30 +755,56 @@ object ImagePipeline {
         val previewPixelCount = state.pixelCount
 
         // L channel
-        val capL = params.lightStrength * (state.rawHistL!!.maxOrNull() ?: 0.0)
+        val capL = (1.0f - params.lightSmoothing) *
+            (state.rawHistL!!.maxOrNull() ?: 0.0)
         val cappedHistL = capHistogram(state.rawHistL!!, capL)
-        val blackL = params.lightBlacks.toDouble()
-        val whiteL = params.lightWhites.toDouble()
+        val blackL = params.lightLift.toDouble()
+        val whiteL = params.lightGain.toDouble()
         val transferL = buildTransferLutWithEdges(
             cappedHistL,
-            params.lightShadows.toDouble(),
-            params.lightHighlights.toDouble(),
-            params.lightMidtoneBalance.toDouble(),
-            params.lightMidtoneContrast.toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightShadows,
+                ParameterRanges.TOE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightHighlights,
+                ParameterRanges.SHOULDER
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightMidtoneBalance,
+                ParameterRanges.BALANCE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightMidtoneContrast,
+                ParameterRanges.GAMMA
+            ).toDouble(),
             blackL, whiteL
         )
 
         // C channel
-        val capC = params.colorStrength * (state.rawHistC!!.maxOrNull() ?: 0.0)
+        val capC = (1.0f - params.colorSmoothing) *
+            (state.rawHistC!!.maxOrNull() ?: 0.0)
         val cappedHistC = capHistogram(state.rawHistC!!, capC)
         val transferC = buildTransferLutWithEdges(
             cappedHistC,
-            params.colorMutedColors.toDouble(),
-            params.colorVividColors.toDouble(),
-            params.colorSaturationBalance.toDouble(),
-            params.colorVibrancy.toDouble(),
-            params.colorBlacks.toDouble(),
-            params.colorWhites.toDouble()
+            ParameterRanges.controlToShape(
+                params.colorMutedColors,
+                ParameterRanges.TOE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorVividColors,
+                ParameterRanges.SHOULDER
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorSaturationBalance,
+                ParameterRanges.BALANCE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorVibrancy,
+                ParameterRanges.GAMMA
+            ).toDouble(),
+            params.colorLift.toDouble(),
+            params.colorGain.toDouble()
         )
 
         // Output CDF for zone weights (computed from preview L data)
@@ -769,12 +830,15 @@ object ImagePipeline {
         val cdfValuesFloat = FloatArray(NUM_BINS) { outCdf[it].toFloat() }
 
         val chromaParams = floatArrayOf(
-            params.shadowTintAngle, params.shadowTintStrength,
-            params.midtoneTintAngle, params.midtoneTintStrength,
-            params.highlightTintAngle, params.highlightTintStrength
+            ParameterRanges.hueToRadians(params.shadowTintHue),
+            ParameterRanges.tintStrengthToRender(params.shadowTintStrength),
+            ParameterRanges.hueToRadians(params.midtoneTintHue),
+            ParameterRanges.tintStrengthToRender(params.midtoneTintStrength),
+            ParameterRanges.hueToRadians(params.highlightTintHue),
+            ParameterRanges.tintStrengthToRender(params.highlightTintStrength)
         )
-        val blackC = params.colorBlacks
-        val whiteC = params.colorWhites
+        val blackC = params.colorLift
+        val whiteC = params.colorGain
 
         // --- Tiled processing ---
         val outBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -818,8 +882,12 @@ object ImagePipeline {
                     blackC, whiteC,
                     chromaParams,
                     GpuPipeline.GrainRenderParams(
-                        amount = params.grainAmount,
-                        size = params.grainSize,
+                        amount = ParameterRanges.grainAmountToRender(
+                            params.grainAmount
+                        ),
+                        size = ParameterRanges.grainSizeToRender(
+                            params.grainSize
+                        ),
                         rowWidth = tileW,
                         originX = x0,
                         originY = y0,
@@ -883,30 +951,56 @@ object ImagePipeline {
         val previewPixelCount = state.pixelCount
 
         // L channel
-        val capL = params.lightStrength * (state.rawHistL!!.maxOrNull() ?: 0.0)
+        val capL = (1.0f - params.lightSmoothing) *
+            (state.rawHistL!!.maxOrNull() ?: 0.0)
         val cappedHistL = capHistogram(state.rawHistL!!, capL)
-        val blackL = params.lightBlacks.toDouble()
-        val whiteL = params.lightWhites.toDouble()
+        val blackL = params.lightLift.toDouble()
+        val whiteL = params.lightGain.toDouble()
         val transferL = buildTransferLutWithEdges(
             cappedHistL,
-            params.lightShadows.toDouble(),
-            params.lightHighlights.toDouble(),
-            params.lightMidtoneBalance.toDouble(),
-            params.lightMidtoneContrast.toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightShadows,
+                ParameterRanges.TOE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightHighlights,
+                ParameterRanges.SHOULDER
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightMidtoneBalance,
+                ParameterRanges.BALANCE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.lightMidtoneContrast,
+                ParameterRanges.GAMMA
+            ).toDouble(),
             blackL, whiteL
         )
 
         // C channel
-        val capC = params.colorStrength * (state.rawHistC!!.maxOrNull() ?: 0.0)
+        val capC = (1.0f - params.colorSmoothing) *
+            (state.rawHistC!!.maxOrNull() ?: 0.0)
         val cappedHistC = capHistogram(state.rawHistC!!, capC)
         val transferC = buildTransferLutWithEdges(
             cappedHistC,
-            params.colorMutedColors.toDouble(),
-            params.colorVividColors.toDouble(),
-            params.colorSaturationBalance.toDouble(),
-            params.colorVibrancy.toDouble(),
-            params.colorBlacks.toDouble(),
-            params.colorWhites.toDouble()
+            ParameterRanges.controlToShape(
+                params.colorMutedColors,
+                ParameterRanges.TOE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorVividColors,
+                ParameterRanges.SHOULDER
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorSaturationBalance,
+                ParameterRanges.BALANCE
+            ).toDouble(),
+            ParameterRanges.controlToShape(
+                params.colorVibrancy,
+                ParameterRanges.GAMMA
+            ).toDouble(),
+            params.colorLift.toDouble(),
+            params.colorGain.toDouble()
         )
 
         // Output CDF for zone weights (from preview L data)
@@ -932,9 +1026,12 @@ object ImagePipeline {
         val cdfValuesFloat = FloatArray(NUM_BINS) { outCdf[it].toFloat() }
 
         val chromaParams = floatArrayOf(
-            params.shadowTintAngle, params.shadowTintStrength,
-            params.midtoneTintAngle, params.midtoneTintStrength,
-            params.highlightTintAngle, params.highlightTintStrength
+            ParameterRanges.hueToRadians(params.shadowTintHue),
+            ParameterRanges.tintStrengthToRender(params.shadowTintStrength),
+            ParameterRanges.hueToRadians(params.midtoneTintHue),
+            ParameterRanges.tintStrengthToRender(params.midtoneTintStrength),
+            ParameterRanges.hueToRadians(params.highlightTintHue),
+            ParameterRanges.tintStrengthToRender(params.highlightTintStrength)
         )
 
         // --- Extract crop pixels from original bitmap ---
@@ -958,11 +1055,13 @@ object ImagePipeline {
         val outPixels = gpuPipeline.processPass2(
             transferL, transferC, cdfValuesFloat,
             blackL.toFloat(), whiteL.toFloat(),
-            params.colorBlacks, params.colorWhites,
+            params.colorLift, params.colorGain,
             chromaParams,
             GpuPipeline.GrainRenderParams(
-                amount = params.grainAmount,
-                size = params.grainSize,
+                amount = ParameterRanges.grainAmountToRender(
+                    params.grainAmount
+                ),
+                size = ParameterRanges.grainSizeToRender(params.grainSize),
                 rowWidth = cropW,
                 originX = cropX,
                 originY = cropY,
@@ -997,29 +1096,55 @@ object ImagePipeline {
     ): PipelineParams {
         return when (channel) {
             "light" -> {
-                val cap = params.lightStrength * (state.rawHistL!!.maxOrNull()?.toFloat() ?: 0f)
+                val cap = (1.0f - params.lightSmoothing) *
+                    (state.rawHistL!!.maxOrNull()?.toFloat() ?: 0f)
                 val cappedHist = capHistogram(state.rawHistL!!, cap.toDouble())
                 val fitted = FitParams.fitInitialParams(cappedHist)
                 params.copy(
-                    lightShadows = fitted["t"]!!.toFloat(),
-                    lightHighlights = fitted["s"]!!.toFloat(),
-                    lightMidtoneBalance = fitted["c"]!!.toFloat(),
-                    lightMidtoneContrast = fitted["g"]!!.toFloat(),
-                    lightBlacks = fitted["x_lo"]!!.toFloat(),
-                    lightWhites = (fitted["x_hi"]!! - 1.0).toFloat()
+                    lightShadows = ParameterRanges.shapeToControl(
+                        fitted["t"]!!.toFloat(),
+                        ParameterRanges.TOE
+                    ),
+                    lightHighlights = ParameterRanges.shapeToControl(
+                        fitted["s"]!!.toFloat(),
+                        ParameterRanges.SHOULDER
+                    ),
+                    lightMidtoneBalance = ParameterRanges.shapeToControl(
+                        fitted["c"]!!.toFloat(),
+                        ParameterRanges.BALANCE
+                    ),
+                    lightMidtoneContrast = ParameterRanges.shapeToControl(
+                        fitted["g"]!!.toFloat(),
+                        ParameterRanges.GAMMA
+                    ),
+                    lightLift = fitted["x_lo"]!!.toFloat(),
+                    lightGain = (fitted["x_hi"]!! - 1.0).toFloat()
                 )
             }
             "color" -> {
-                val cap = params.colorStrength * (state.rawHistC!!.maxOrNull()?.toFloat() ?: 0f)
+                val cap = (1.0f - params.colorSmoothing) *
+                    (state.rawHistC!!.maxOrNull()?.toFloat() ?: 0f)
                 val cappedHist = capHistogram(state.rawHistC!!, cap.toDouble())
                 val fitted = FitParams.fitInitialParams(cappedHist)
                 params.copy(
-                    colorMutedColors = fitted["t"]!!.toFloat(),
-                    colorVividColors = fitted["s"]!!.toFloat(),
-                    colorSaturationBalance = fitted["c"]!!.toFloat(),
-                    colorVibrancy = fitted["g"]!!.toFloat(),
-                    colorBlacks = fitted["x_lo"]!!.toFloat(),
-                    colorWhites = (fitted["x_hi"]!! - 1.0).toFloat()
+                    colorMutedColors = ParameterRanges.shapeToControl(
+                        fitted["t"]!!.toFloat(),
+                        ParameterRanges.TOE
+                    ),
+                    colorVividColors = ParameterRanges.shapeToControl(
+                        fitted["s"]!!.toFloat(),
+                        ParameterRanges.SHOULDER
+                    ),
+                    colorSaturationBalance = ParameterRanges.shapeToControl(
+                        fitted["c"]!!.toFloat(),
+                        ParameterRanges.BALANCE
+                    ),
+                    colorVibrancy = ParameterRanges.shapeToControl(
+                        fitted["g"]!!.toFloat(),
+                        ParameterRanges.GAMMA
+                    ),
+                    colorLift = fitted["x_lo"]!!.toFloat(),
+                    colorGain = (fitted["x_hi"]!! - 1.0).toFloat()
                 )
             }
             else -> throw IllegalArgumentException("channel must be 'light' or 'color'")

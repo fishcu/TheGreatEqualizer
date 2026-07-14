@@ -28,17 +28,29 @@ object FitParams {
     val PARAM_NAMES = arrayOf("t", "s", "c", "g")
 
     val PARAM_BOUNDS = mapOf(
-        "t" to Pair(0.01, 1.37),
-        "s" to Pair(0.20, 1.56),
-        "c" to Pair(0.01, 0.99),
-        "g" to Pair(0.10, 1.25)
+        "t" to Pair(
+            ParameterRanges.TOE.min.toDouble(),
+            ParameterRanges.TOE.max.toDouble()
+        ),
+        "s" to Pair(
+            ParameterRanges.SHOULDER.min.toDouble(),
+            ParameterRanges.SHOULDER.max.toDouble()
+        ),
+        "c" to Pair(
+            ParameterRanges.BALANCE.min.toDouble(),
+            ParameterRanges.BALANCE.max.toDouble()
+        ),
+        "g" to Pair(
+            ParameterRanges.GAMMA.min.toDouble(),
+            ParameterRanges.GAMMA.max.toDouble()
+        )
     )
 
     val PARAM_DEFAULTS = mapOf(
-        "t" to PI_4,
-        "s" to PI_4,
-        "c" to 0.5,
-        "g" to PI_4
+        "t" to ParameterRanges.TOE.neutral.toDouble(),
+        "s" to ParameterRanges.SHOULDER.neutral.toDouble(),
+        "c" to ParameterRanges.BALANCE.neutral.toDouble(),
+        "g" to ParameterRanges.GAMMA.neutral.toDouble()
     )
 
     const val TRIM_EPS = 5e-3

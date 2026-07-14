@@ -21,4 +21,9 @@
         android:icon="@drawable/ic_magic_wand_24"
         android:title="@string/nav_fx" />
 
+    <item
+        android:id="@+id/nav_presets"
+        android:icon="@drawable/ic_presets_24"
+        android:title="@string/nav_presets" />
+
 </menu>
