@@ -3,18 +3,26 @@ package com.thegreatequalizer.app
 object BuiltInPresets {
     val all: List<Preset> = listOf(
         Preset(
-            name = "Simple B&W",
-            author = "",
+            name = "All Sat, No Brakes",
+            author = "Fishku",
             settings = linkedMapOf(
-                "light.shadows" to PresetSettingValue.scalar(0.4f),
-                "light.highlights" to PresetSettingValue.scalar(0.6f),
+                "color.lift" to PresetSettingValue.scalar(1.0f),
+                "color.gain" to PresetSettingValue.scalar(0.0f)
+            )
+        ),
+        Preset(
+            name = "Monochrome Contrast",
+            author = "Fishku",
+            settings = linkedMapOf(
+                "light.shadows" to PresetSettingValue.scalar(0.3f),
+                "light.highlights" to PresetSettingValue.scalar(0.7f),
                 "color.lift" to PresetSettingValue.scalar(0.0f),
                 "color.gain" to PresetSettingValue.scalar(-1.0f)
             )
         ),
         Preset(
             name = "Purple Rain",
-            author = "",
+            author = "Fishku",
             settings = linkedMapOf(
                 "tint.shadows" to PresetSettingValue.compound(
                     2.0f / 3.0f,
@@ -27,9 +35,7 @@ object BuiltInPresets {
                 "tint.highlights" to PresetSettingValue.compound(
                     0.0f,
                     0.3f
-                ),
-                "vignette.amount" to PresetSettingValue.scalar(0.166f),
-                "grain.amount" to PresetSettingValue.scalar(0.05f)
+                )
             )
         )
     )

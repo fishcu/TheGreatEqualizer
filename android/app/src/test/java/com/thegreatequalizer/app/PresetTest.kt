@@ -67,14 +67,20 @@ class PresetTest {
     @Test
     fun builtInPresetsAreValidAndUseCanonicalTintHues() {
         assertEquals(
-            listOf("Simple B&W", "Purple Rain"),
+            listOf(
+                "All Sat, No Brakes",
+                "Monochrome Contrast",
+                "Purple Rain"
+            ),
             BuiltInPresets.all.map(Preset::name)
         )
         BuiltInPresets.all.forEach(
             PresetSettingCatalog::normalizeAndValidate
         )
 
-        val purpleRain = BuiltInPresets.all[1]
+        val purpleRain = BuiltInPresets.all.first {
+            it.name == "Purple Rain"
+        }
         assertEquals(
             2.0f / 3.0f,
             purpleRain.settings["tint.shadows"]!!.components[0]
