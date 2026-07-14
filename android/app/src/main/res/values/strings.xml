@@ -41,6 +41,7 @@
     <string name="preset_empty">No presets yet</string>
     <string name="preset_name">Preset name</string>
     <string name="preset_author">Author (optional)</string>
+    <string name="preset_settings_to_include">Settings to include in this preset</string>
     <string name="preset_select_all">Select all</string>
     <string name="preset_select_none">Select none</string>
     <string name="preset_save">Save</string>
@@ -62,5 +63,4 @@
     <string name="preset_select_setting">Select at least one setting</string>
     <string name="preset_clipboard_empty">Clipboard does not contain text</string>
     <string name="preset_storage_error">Could not save presets: %1$s</string>
-    <string name="preset_setting_label">%1$s: %2$s</string>
 </resources>

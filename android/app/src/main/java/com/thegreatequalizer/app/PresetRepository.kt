@@ -17,6 +17,9 @@ class PresetRepository(context: Context) {
                 .bufferedReader(StandardCharsets.UTF_8)
                 .use { reader -> reader.readText() }
             items.addAll(PresetJsonCodec.decodeLibrary(text))
+        } else {
+            persist(BuiltInPresets.all)
+            items.addAll(BuiltInPresets.all)
         }
     }
 

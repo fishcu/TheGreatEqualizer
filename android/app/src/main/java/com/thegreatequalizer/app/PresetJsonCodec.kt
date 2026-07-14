@@ -3,8 +3,11 @@ package com.thegreatequalizer.app
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import kotlin.math.round
 
 object PresetJsonCodec {
+    private const val CLIPBOARD_DECIMAL_FACTOR = 1000.0
+
     private val presetKeys = setOf(
         "version",
         "name",
@@ -15,6 +18,12 @@ object PresetJsonCodec {
     fun encode(preset: Preset): String =
         encodeObject(
             PresetSettingCatalog.normalizeAndValidate(preset)
+        ).toString()
+
+    fun encodeForClipboard(preset: Preset): String =
+        encodeObject(
+            PresetSettingCatalog.normalizeAndValidate(preset),
+            ::roundForClipboard
         ).toString()
 
     fun decode(text: String): Preset {
@@ -69,18 +78,24 @@ object PresetJsonCodec {
         return presets
     }
 
-    private fun encodeObject(preset: Preset): JSONObject {
+    private fun encodeObject(
+        preset: Preset,
+        encodeNumber: (Float) -> Number = { value -> value }
+    ): JSONObject {
         val settings = JSONObject()
         for (spec in PresetSettingCatalog.all) {
             val value = preset.settings[spec.key] ?: continue
             if (spec.componentNames.size == 1) {
-                settings.put(spec.key, value.components.single())
+                settings.put(
+                    spec.key,
+                    encodeNumber(value.components.single())
+                )
             } else {
                 val compound = JSONObject()
                 for (index in spec.componentNames.indices) {
                     compound.put(
                         spec.componentNames[index],
-                        value.components[index]
+                        encodeNumber(value.components[index])
                     )
                 }
                 settings.put(spec.key, compound)
@@ -91,6 +106,13 @@ object PresetJsonCodec {
             .put("name", preset.name)
             .put("author", preset.author)
             .put("settings", settings)
+    }
+
+    private fun roundForClipboard(value: Float): Double {
+        val rounded = round(
+            value.toDouble() * CLIPBOARD_DECIMAL_FACTOR
+        ) / CLIPBOARD_DECIMAL_FACTOR
+        return if (rounded == -0.0) 0.0 else rounded
     }
 
     private fun decodeObject(json: JSONObject): Preset {

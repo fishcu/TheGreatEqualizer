@@ -65,6 +65,31 @@ class PresetTest {
     }
 
     @Test
+    fun builtInPresetsAreValidAndUseCanonicalTintHues() {
+        assertEquals(
+            listOf("Simple B&W", "Purple Rain"),
+            BuiltInPresets.all.map(Preset::name)
+        )
+        BuiltInPresets.all.forEach(
+            PresetSettingCatalog::normalizeAndValidate
+        )
+
+        val purpleRain = BuiltInPresets.all[1]
+        assertEquals(
+            2.0f / 3.0f,
+            purpleRain.settings["tint.shadows"]!!.components[0]
+        )
+        assertEquals(
+            5.0f / 6.0f,
+            purpleRain.settings["tint.midtones"]!!.components[0]
+        )
+        assertEquals(
+            0.0f,
+            purpleRain.settings["tint.highlights"]!!.components[0]
+        )
+    }
+
+    @Test
     fun sparsePresetOnlyChangesIncludedControls() {
         val base = PipelineParams(
             lightSmoothing = 0.2f,
@@ -146,6 +171,34 @@ class PresetTest {
         assertEquals(
             PresetSettingValue.scalar(2.0f),
             decoded.settings["grain.amount"]
+        )
+    }
+
+    @Test
+    fun clipboardJsonRoundsValuesToThreeDecimalPlaces() {
+        val encoded = PresetJsonCodec.encodeForClipboard(
+            Preset(
+                name = "Rounded",
+                author = "",
+                settings = linkedMapOf(
+                    "light.smoothing" to
+                        PresetSettingValue.scalar(0.12349f),
+                    "tint.shadows" to
+                        PresetSettingValue.compound(0.98765f, 0.45678f)
+                )
+            )
+        )
+        val decoded = PresetJsonCodec.decode(encoded)
+
+        assertTrue(encoded.contains("\"light.smoothing\":0.123"))
+        assertEquals(
+            0.123f,
+            decoded.settings["light.smoothing"]!!.components.single(),
+            0.0001f
+        )
+        assertEquals(
+            listOf(0.988f, 0.457f),
+            decoded.settings["tint.shadows"]!!.components
         )
     }
 

@@ -3,7 +3,9 @@ package com.thegreatequalizer.app
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -151,14 +153,32 @@ class PresetsFragment : Fragment() {
             R.id.preset_setting_checkboxes
         )
         val checkboxes = linkedMapOf<String, CheckBox>()
+        val groupSpacing = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP,
+            12.0f,
+            resources.displayMetrics
+        ).toInt()
+        var currentGroup: String? = null
 
         for (spec in PresetSettingCatalog.all) {
+            if (spec.group != currentGroup) {
+                val heading = TextView(requireContext()).apply {
+                    text = spec.group
+                    setTextColor(Color.LTGRAY)
+                    textSize = 14.0f
+                    setTypeface(typeface, Typeface.BOLD)
+                    setPadding(
+                        0,
+                        if (currentGroup == null) 0 else groupSpacing,
+                        0,
+                        0
+                    )
+                }
+                checkboxContainer.addView(heading)
+                currentGroup = spec.group
+            }
             val checkbox = CheckBox(requireContext()).apply {
-                text = getString(
-                    R.string.preset_setting_label,
-                    spec.group,
-                    spec.label
-                )
+                text = spec.label
                 setTextColor(Color.WHITE)
                 isChecked = spec.key in defaultKeys
                 tag = spec.key
@@ -242,7 +262,7 @@ class PresetsFragment : Fragment() {
         clipboard.setPrimaryClip(
             ClipData.newPlainText(
                 "The Great Equalizer preset",
-                PresetJsonCodec.encode(preset)
+                PresetJsonCodec.encodeForClipboard(preset)
             )
         )
         Toast.makeText(

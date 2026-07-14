@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.TheGreatEqualizer" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <item name="colorPrimary">#6200EE</item>
-        <item name="colorPrimaryVariant">#3700B3</item>
-        <item name="colorOnPrimary">@android:color/white</item>
+        <item name="colorPrimary">#D0BCFF</item>
+        <item name="colorPrimaryVariant">#9A82DB</item>
+        <item name="colorOnPrimary">#251A3D</item>
         <item name="colorSecondary">#03DAC5</item>
         <item name="colorSecondaryVariant">#018786</item>
         <item name="colorOnSecondary">@android:color/black</item>
