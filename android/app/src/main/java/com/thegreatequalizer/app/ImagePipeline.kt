@@ -1,9 +1,6 @@
 package com.thegreatequalizer.app
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.Rect
 import android.util.Log
 import kotlin.math.*
 
@@ -511,24 +508,45 @@ object ImagePipeline {
      * Called once when a new image is loaded. Results are cached in PipelineState.
      */
     fun processPass1Only(
-        input: Bitmap,
+        previewBitmap: Bitmap,
+        fullWidth: Int,
+        fullHeight: Int,
         gamutLut: FloatArray,
         gpuPipeline: GpuPipeline,
         params: PipelineParams
     ): PipelineState {
         val state = PipelineState()
 
-        val scaled = downscaleIfNeeded(input)
-        state.fullWidth = input.width
-        state.fullHeight = input.height
-        state.originalBitmap = scaled
-        state.width = scaled.width
-        state.height = scaled.height
-        state.pixelCount = scaled.width * scaled.height
+        require(
+            maxOf(previewBitmap.width, previewBitmap.height) <=
+                MAX_PROCESSING_EDGE
+        ) {
+            "Preview bitmap exceeds the processing edge limit"
+        }
+        require(
+            fullWidth >= previewBitmap.width &&
+                fullHeight >= previewBitmap.height
+        ) {
+            "Full image dimensions must contain the preview"
+        }
+        state.fullWidth = fullWidth
+        state.fullHeight = fullHeight
+        state.previewBitmap = previewBitmap
+        state.width = previewBitmap.width
+        state.height = previewBitmap.height
+        state.pixelCount = previewBitmap.width * previewBitmap.height
 
         // Extract pixels
         val pixels = IntArray(state.pixelCount)
-        scaled.getPixels(pixels, 0, state.width, 0, 0, state.width, state.height)
+        previewBitmap.getPixels(
+            pixels,
+            0,
+            state.width,
+            0,
+            0,
+            state.width,
+            state.height
+        )
 
         // Analyze the source without FX. These histograms define "input" for
         // fitting and equalization even when vignette changes the rendered pixels.
@@ -570,7 +588,7 @@ object ImagePipeline {
         ) return
 
         val totalStart = System.nanoTime()
-        val preview = state.originalBitmap!!
+        val preview = state.previewBitmap!!
         val pixels = IntArray(state.pixelCount)
         preview.getPixels(
             pixels,
@@ -755,7 +773,7 @@ object ImagePipeline {
      * Caller should re-run pass1 on preview pixels to restore state.
      */
     fun processFullResolution(
-        originalBitmap: Bitmap,
+        source: ImageSource,
         state: PipelineState,
         params: PipelineParams,
         gamutLut: FloatArray,
@@ -763,8 +781,8 @@ object ImagePipeline {
         tileSize: Int = 1024,
         onProgress: (Float) -> Unit = {}
     ): Bitmap {
-        val width = originalBitmap.width
-        val height = originalBitmap.height
+        val width = source.width
+        val height = source.height
         Log.i(TAG, "[FullRes] Image: ${width}x${height}, tile: $tileSize")
 
         // --- Compute transfer LUTs and CDF (same as processFromParams) ---
@@ -856,20 +874,42 @@ object ImagePipeline {
         val tilesY = (height + tileSize - 1) / tileSize
         val totalTiles = tilesX * tilesY
         var completedTiles = 0
+        var succeeded = false
 
-        Log.i(TAG, "[FullRes] Processing $totalTiles tiles (${tilesX}x${tilesY})")
+        try {
+            Log.i(
+                TAG,
+                "[FullRes] Processing $totalTiles tiles (${tilesX}x${tilesY})"
+            )
 
-        for (ty in 0 until tilesY) {
-            for (tx in 0 until tilesX) {
+            for (ty in 0 until tilesY) {
+                for (tx in 0 until tilesX) {
                 val x0 = tx * tileSize
                 val y0 = ty * tileSize
                 val tileW = minOf(tileSize, width - x0)
                 val tileH = minOf(tileSize, height - y0)
                 val tilePixelCount = tileW * tileH
 
-                // Extract tile pixels from full-res bitmap
+                // Decode only this source tile.
                 val tilePixels = IntArray(tilePixelCount)
-                originalBitmap.getPixels(tilePixels, 0, tileW, x0, y0, tileW, tileH)
+                val tileBitmap = source.decodeRegion(
+                    ImageRegion(x0, y0, tileW, tileH),
+                    tileW,
+                    tileH
+                )
+                try {
+                    tileBitmap.getPixels(
+                        tilePixels,
+                        0,
+                        tileW,
+                        0,
+                        0,
+                        tileW,
+                        tileH
+                    )
+                } finally {
+                    tileBitmap.recycle()
+                }
 
                 // Pass 1: populate OKLab SSBOs (no readback needed)
                 gpuPipeline.processPass1NoReadback(
@@ -910,13 +950,19 @@ object ImagePipeline {
                 // Write tile to output bitmap
                 outBitmap.setPixels(outPixels, 0, tileW, x0, y0, tileW, tileH)
 
-                completedTiles++
-                onProgress(completedTiles.toFloat() / totalTiles)
+                    completedTiles++
+                    onProgress(completedTiles.toFloat() / totalTiles)
+                }
+            }
+
+            Log.i(TAG, "[FullRes] Done: ${width}x${height}")
+            succeeded = true
+            return outBitmap
+        } finally {
+            if (!succeeded) {
+                outBitmap.recycle()
             }
         }
-
-        Log.i(TAG, "[FullRes] Done: ${width}x${height}")
-        return outBitmap
     }
 
     // ---------------------------------------------------------------
@@ -924,14 +970,14 @@ object ImagePipeline {
     // ---------------------------------------------------------------
 
     /**
-     * Process a crop region from the original full-resolution bitmap.
+     * Process a crop region decoded from the full-resolution image source.
      * Uses the same transfer LUTs derived from preview histograms (same approach as tiled export).
      *
      * Must be called on the GPU thread.
      * After calling this, the GPU SSBOs contain the crop's data.
      * Caller should re-run pass1 on preview pixels to restore state.
      *
-     * @param originalBitmap The full-resolution source bitmap
+     * @param source The full-resolution encoded image source
      * @param cropX Left edge in original image pixels
      * @param cropY Top edge in original image pixels
      * @param cropW Width in original image pixels
@@ -945,7 +991,7 @@ object ImagePipeline {
      * @return Matching source and processed overlay bitmaps
      */
     fun processHiResCrop(
-        originalBitmap: Bitmap,
+        source: ImageSource,
         cropX: Int,
         cropY: Int,
         cropW: Int,
@@ -1050,14 +1096,11 @@ object ImagePipeline {
             ParameterRanges.tintStrengthToRender(params.highlightTintStrength)
         )
 
-        // --- Sample only the display-resolution crop from the original bitmap ---
-        val originalCropBitmap =
-            Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-        Canvas(originalCropBitmap).drawBitmap(
-            originalBitmap,
-            Rect(cropX, cropY, cropX + cropW, cropY + cropH),
-            Rect(0, 0, outputWidth, outputHeight),
-            Paint(Paint.FILTER_BITMAP_FLAG)
+        // --- Decode only the display-resolution source crop ---
+        val originalCropBitmap = source.decodeRegion(
+            ImageRegion(cropX, cropY, cropW, cropH),
+            outputWidth,
+            outputHeight
         )
         val cropPixels = IntArray(pixelCount)
         originalCropBitmap.getPixels(
@@ -1079,8 +1122,8 @@ object ImagePipeline {
                 outputWidth,
                 cropX,
                 cropY,
-                originalBitmap.width,
-                originalBitmap.height,
+                source.width,
+                source.height,
                 coordinateScaleX,
                 coordinateScaleY
             )

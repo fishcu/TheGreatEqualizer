@@ -4,7 +4,7 @@ import android.graphics.Bitmap
 
 class PipelineState {
     // Set after image load + pass 1
-    var originalBitmap: Bitmap? = null
+    var previewBitmap: Bitmap? = null
 
     // Active pass 1 outputs, rebuilt when the vignette changes.
     var pass1L: FloatArray? = null

@@ -4,7 +4,6 @@ import android.content.ContentValues
 import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.ImageDecoder
 import android.graphics.RectF
 import android.content.res.Configuration
 import android.net.Uri
@@ -32,6 +31,7 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -99,7 +99,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var bottomNav: BottomNavigationView
     private lateinit var presetRepository: PresetRepository
     private var currentNavItemId: Int = R.id.nav_light
-    private var originalBitmap: Bitmap? = null
+    private var imageSource: ImageSource? = null
     private var processedBitmap: Bitmap? = null
     private lateinit var gamutLut: FloatArray
     private lateinit var gpuPipeline: GpuPipeline
@@ -122,6 +122,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingParams: PipelineParams? = null
     private var renderGeneration = 0L
     private var imageGeneration = 0L
+    private var imageLoadGeneration = 0L
+    private var imageLoadJob: Job? = null
     private var imageProcessingJob: Job? = null
     private var isShowingOriginal = false
     private var multiTouchActive = false
@@ -145,6 +147,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         presetRepository = PresetRepository(this)
+        UriImageSource.clearStaleCache(cacheDir)
         bindViews()
 
         shakeDetector = ShakeDetector(this) { runOnUiThread { randomizeParams("Shake randomize") } }
@@ -257,7 +260,7 @@ class MainActivity : AppCompatActivity() {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (isTouchOnImageView(event) && !isTouchOnImageAction(event)) {
-                    val orig = pipelineState.originalBitmap
+                    val orig = pipelineState.previewBitmap
                     val proc = processedBitmap
                     if (orig != null && proc != null) {
                         multiTouchActive = false
@@ -354,18 +357,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadImageFromUri(uri: Uri) {
-        try {
-            val bitmap = loadBitmapFromUri(uri)
+        val loadGeneration = ++imageLoadGeneration
+        imageLoadJob?.cancel()
+        imageLoadJob = lifecycleScope.launch {
+            var candidate: UriImageSource? = null
+            try {
+                withContext(Dispatchers.IO) {
+                    candidate = UriImageSource.create(
+                        contentResolver,
+                        uri,
+                        cacheDir
+                    )
+                }
+                if (loadGeneration != imageLoadGeneration) return@launch
 
-            if (bitmap != null) {
+                val previousSource = imageSource
+                val previousPreview = pipelineState.previewBitmap
+                val previousProcessed = processedBitmap
                 clearEditHistory()
                 imageGeneration++
+                abDelayJob?.cancel()
+                abDelayJob = null
+                isShowingOriginal = false
                 imageProcessingJob?.cancel()
                 renderJob?.cancel()
                 renderJob = null
                 isRendering = false
                 invalidateHiResCrop()
-                originalBitmap = bitmap
+                imageSource = candidate!!
+                candidate = null
                 processedBitmap = null
                 pipelineState = PipelineState()
                 pipelineParams = PipelineParams()
@@ -373,23 +393,53 @@ class MainActivity : AppCompatActivity() {
                 renderGeneration++
                 imageView.setImageBitmap(null)
                 showImageLoaded()
+                retireImageSession(
+                    previousSource,
+                    previousPreview,
+                    previousProcessed
+                )
                 processImage()
-            } else {
-                Toast.makeText(this, "Failed to decode image", Toast.LENGTH_SHORT).show()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.e(TAG, "Image source load failed", error)
+                Toast.makeText(
+                    this@MainActivity,
+                    "Error loading image: ${error.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } finally {
+                val unusedSource = candidate
+                if (unusedSource != null) {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        unusedSource.close()
+                    }
+                }
             }
-        } catch (e: Exception) {
-            Toast.makeText(this, "Error loading image: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun loadBitmapFromUri(uri: Uri): Bitmap? {
-        return ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { decoder, _, _ ->
-            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+    private fun retireImageSession(
+        source: ImageSource?,
+        previewBitmap: Bitmap?,
+        outputBitmap: Bitmap?
+    ) {
+        if (
+            source == null &&
+            previewBitmap == null &&
+            outputBitmap == null
+        ) return
+        lifecycleScope.launch {
+            withContext(gpuDispatcher) {
+                source?.close()
+                previewBitmap?.recycle()
+                outputBitmap?.recycle()
+            }
         }
     }
 
     private fun processImage() {
-        val src = originalBitmap ?: return
+        val source = imageSource ?: return
         when (gpuStatus) {
             GpuStatus.INITIALIZING -> return
             GpuStatus.UNAVAILABLE -> {
@@ -406,12 +456,31 @@ class MainActivity : AppCompatActivity() {
         imageProcessingJob?.cancel()
         imageProcessingJob = lifecycleScope.launch {
             val startMs = System.currentTimeMillis()
+            var unownedPreview: Bitmap? = null
             try {
-                val state = withContext(gpuDispatcher) {
-                    ImagePipeline.processPass1Only(src, lut, gpu, initialParams)
+                withContext(Dispatchers.IO) {
+                    unownedPreview = source.decodePreview(
+                        ImagePipeline.MAX_PROCESSING_EDGE
+                    )
                 }
                 if (generation != imageGeneration) return@launch
-                imageView.setImageBitmap(state.originalBitmap)
+                val preview = unownedPreview!!
+                val state = withContext(gpuDispatcher) {
+                    ImagePipeline.processPass1Only(
+                        preview,
+                        source.width,
+                        source.height,
+                        lut,
+                        gpu,
+                        initialParams
+                    )
+                }
+                unownedPreview = null
+                if (generation != imageGeneration) {
+                    state.previewBitmap!!.recycle()
+                    return@launch
+                }
+                imageView.setImageBitmap(state.previewBitmap)
 
                 var params = initialParams
                 params = withContext(Dispatchers.Default) {
@@ -450,6 +519,8 @@ class MainActivity : AppCompatActivity() {
                     "Processing error: ${error.message}",
                     Toast.LENGTH_LONG
                 ).show()
+            } finally {
+                unownedPreview?.recycle()
             }
         }
     }
@@ -828,10 +899,12 @@ class MainActivity : AppCompatActivity() {
                     outBitmap.recycle()
                     return@launch
                 }
+                val previousBitmap = processedBitmap
                 processedBitmap = outBitmap
                 if (!isShowingOriginal) {
                     updateImageBitmap(outBitmap)
                 }
+                previousBitmap?.recycle()
             } catch (error: CancellationException) {
                 throw error
             } catch (e: Exception) {
@@ -905,8 +978,12 @@ class MainActivity : AppCompatActivity() {
             imageView.clearOverlay()
             return
         }
-        val orig = originalBitmap
-        if (orig == null || maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+        val source = imageSource
+        if (
+            source == null ||
+            maxOf(source.width, source.height) <=
+                ImagePipeline.MAX_PROCESSING_EDGE
+        ) {
             imageView.clearOverlay()
             return
         }
@@ -935,8 +1012,12 @@ class MainActivity : AppCompatActivity() {
             imageView.clearOverlay()
             return
         }
-        val orig = originalBitmap
-        if (orig == null || maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+        val source = imageSource
+        if (
+            source == null ||
+            maxOf(source.width, source.height) <=
+                ImagePipeline.MAX_PROCESSING_EDGE
+        ) {
             imageView.clearOverlay()
             return
         }
@@ -958,10 +1039,18 @@ class MainActivity : AppCompatActivity() {
     private fun invalidateHiResCrop() {
         cancelHiResCropJob()
         hiResCropGeneration++
+        clearHiResCropCache()
+    }
+
+    private fun clearHiResCropCache() {
+        imageView.clearOverlay()
+        val previousProcessed = currentHiResBitmap
+        val previousOriginal = currentOriginalHiResBitmap
         currentHiResBitmap = null
         currentOriginalHiResBitmap = null
         currentHiResCropRect = null
-        imageView.clearOverlay()
+        previousProcessed?.recycle()
+        previousOriginal?.recycle()
     }
 
     private fun boundedOverlaySize(
@@ -985,7 +1074,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startHiResCrop() {
-        val orig = originalBitmap ?: return
+        val source = imageSource ?: return
         val state = pipelineState
         val params = pipelineParams
         if (gpuStatus != GpuStatus.READY) return
@@ -995,11 +1084,11 @@ class MainActivity : AppCompatActivity() {
 
         // Get visible rect in the 1024px image coordinates
         val visibleRect = imageView.getVisibleImageRect() ?: return
-        val previewBm = state.originalBitmap ?: return
+        val previewBm = state.previewBitmap ?: return
 
         // Scale visible rect from preview coordinates to original coordinates
-        val scaleX = orig.width.toFloat() / previewBm.width.toFloat()
-        val scaleY = orig.height.toFloat() / previewBm.height.toFloat()
+        val scaleX = source.width.toFloat() / previewBm.width.toFloat()
+        val scaleY = source.height.toFloat() / previewBm.height.toFloat()
 
         val origLeft = visibleRect.left * scaleX
         val origTop = visibleRect.top * scaleY
@@ -1011,10 +1100,14 @@ class MainActivity : AppCompatActivity() {
         val padH = (origBottom - origTop) * HIRES_PADDING
 
         // Clamp to image bounds
-        val cropX = (origLeft - padW).toInt().coerceIn(0, orig.width - 1)
-        val cropY = (origTop - padH).toInt().coerceIn(0, orig.height - 1)
-        val cropRight = (origRight + padW).toInt().coerceIn(cropX + 1, orig.width)
-        val cropBottom = (origBottom + padH).toInt().coerceIn(cropY + 1, orig.height)
+        val cropX =
+            (origLeft - padW).toInt().coerceIn(0, source.width - 1)
+        val cropY =
+            (origTop - padH).toInt().coerceIn(0, source.height - 1)
+        val cropRight =
+            (origRight + padW).toInt().coerceIn(cropX + 1, source.width)
+        val cropBottom =
+            (origBottom + padH).toInt().coerceIn(cropY + 1, source.height)
         val cropW = cropRight - cropX
         val cropH = cropBottom - cropY
 
@@ -1031,11 +1124,12 @@ class MainActivity : AppCompatActivity() {
         val gen = hiResCropGeneration
 
         hiResCropJob = lifecycleScope.launch {
+            var unownedCrop: ImagePipeline.HiResCropResult? = null
             try {
-                val cropBitmaps = withContext(gpuDispatcher) {
+                withContext(gpuDispatcher) {
                     try {
-                        ImagePipeline.processHiResCrop(
-                            orig,
+                        unownedCrop = ImagePipeline.processHiResCrop(
+                            source,
                             cropX,
                             cropY,
                             cropW,
@@ -1051,56 +1145,68 @@ class MainActivity : AppCompatActivity() {
                         // A crop may fail or be cancelled after changing shared
                         // SSBOs. Always restore the preview before releasing the
                         // single-threaded GPU dispatcher.
-                        val previewPixels = IntArray(state.pixelCount)
-                        previewBm.getPixels(
-                            previewPixels,
-                            0,
-                            state.width,
-                            0,
-                            0,
-                            state.width,
-                            state.height
-                        )
-                        gpu.processPass1NoReadback(
-                            previewPixels,
-                            state.pixelCount,
-                            previewVignetteRenderParams(state, params)
-                        )
+                        restorePreviewGpuState(state, params, gpu)
                     }
                 }
+                val cropBitmaps = unownedCrop!!
 
                 // Only apply if still the current generation (no cancel/new render happened)
                 if (gen == hiResCropGeneration) {
+                    val previousProcessed = currentHiResBitmap
+                    val previousOriginal = currentOriginalHiResBitmap
                     currentHiResBitmap = cropBitmaps.processedBitmap
                     currentOriginalHiResBitmap = cropBitmaps.originalBitmap
                     currentHiResCropRect = cropRectInPreview
+                    unownedCrop = null
                     val displayedBitmap = if (isShowingOriginal) {
                         cropBitmaps.originalBitmap
                     } else {
                         cropBitmaps.processedBitmap
                     }
                     imageView.setOverlay(displayedBitmap, cropRectInPreview)
+                    previousProcessed?.recycle()
+                    previousOriginal?.recycle()
                     Log.i(
                         TAG,
                         "[HiResCrop] Overlay applied: source ${cropW}x${cropH}, " +
                             "display ${overlaySize.width}x${overlaySize.height}"
                     )
-                } else {
-                    cropBitmaps.originalBitmap.recycle()
-                    cropBitmaps.processedBitmap.recycle()
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
                 if (gen == hiResCropGeneration) {
-                    currentHiResBitmap = null
-                    currentOriginalHiResBitmap = null
-                    currentHiResCropRect = null
-                    imageView.clearOverlay()
+                    clearHiResCropCache()
                 }
                 Log.e(TAG, "Hi-res crop render error", error)
+            } finally {
+                unownedCrop?.originalBitmap?.recycle()
+                unownedCrop?.processedBitmap?.recycle()
             }
         }
+    }
+
+    private fun restorePreviewGpuState(
+        state: PipelineState,
+        params: PipelineParams,
+        gpu: GpuPipeline
+    ) {
+        val previewBitmap = state.previewBitmap!!
+        val previewPixels = IntArray(state.pixelCount)
+        previewBitmap.getPixels(
+            previewPixels,
+            0,
+            state.width,
+            0,
+            0,
+            state.width,
+            state.height
+        )
+        gpu.processPass1NoReadback(
+            previewPixels,
+            state.pixelCount,
+            previewVignetteRenderParams(state, params)
+        )
     }
 
     /**
@@ -1110,11 +1216,11 @@ class MainActivity : AppCompatActivity() {
      * or the image wasn't downscaled.
      */
     private fun processAndExport(action: suspend (Bitmap) -> Unit) {
-        val orig = originalBitmap
+        val source = imageSource
         val state = pipelineState
         val params = pipelineParams
 
-        if (orig == null || !state.isImageLoaded()) {
+        if (source == null || !state.isImageLoaded()) {
             Toast.makeText(this, "No processed image to export", Toast.LENGTH_SHORT).show()
             return
         }
@@ -1130,9 +1236,19 @@ class MainActivity : AppCompatActivity() {
         val gpu = gpuPipeline
 
         // Images that fit in the preview already have a full-resolution render.
-        if (maxOf(orig.width, orig.height) <= ImagePipeline.MAX_PROCESSING_EDGE) {
+        if (
+            maxOf(source.width, source.height) <=
+                ImagePipeline.MAX_PROCESSING_EDGE
+        ) {
             val bitmap = processedBitmap ?: return
-            lifecycleScope.launch { action(bitmap) }
+            val exportBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            lifecycleScope.launch {
+                try {
+                    action(exportBitmap)
+                } finally {
+                    exportBitmap.recycle()
+                }
+            }
             return
         }
 
@@ -1155,51 +1271,50 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
 
         lifecycleScope.launch {
+            var fullResBitmap: Bitmap? = null
             try {
-                // Phase 1: Tiled GPU render (0–85%)
-                val fullResBitmap = withContext(gpuDispatcher) {
-                    ImagePipeline.processFullResolution(
-                        orig, state, params, lut, gpu,
-                        onProgress = { fraction ->
-                            runOnUiThread {
-                                progressBar.progress = (fraction * 85).toInt()
+                // Phase 1: Tiled GPU render and preview-state restore (0–90%)
+                withContext(gpuDispatcher) {
+                    try {
+                        fullResBitmap = ImagePipeline.processFullResolution(
+                            source, state, params, lut, gpu,
+                            onProgress = { fraction ->
+                                runOnUiThread {
+                                    progressBar.progress =
+                                        (fraction * 85).toInt()
+                                }
                             }
-                        }
-                    )
+                        )
+                    } finally {
+                        restorePreviewGpuState(state, params, gpu)
+                    }
                 }
 
-                // Phase 2: Restore preview SSBOs (85–90%)
                 dialog.setTitle("Finalizing\u2026")
-                progressBar.progress = 85
-                withContext(gpuDispatcher) {
-                    val previewBitmap = state.originalBitmap!!
-                    val previewPixels = IntArray(state.pixelCount)
-                    previewBitmap.getPixels(
-                        previewPixels, 0, state.width,
-                        0, 0, state.width, state.height
-                    )
-                    gpu.processPass1(
-                        previewPixels,
-                        state.pixelCount,
-                        previewVignetteRenderParams(state, params)
-                    )
-                }
                 progressBar.progress = 90
 
-                // Phase 3: Export/save (90–100%)
+                // Phase 2: Export/save (90–100%)
                 dialog.setTitle("Saving\u2026")
-                action(fullResBitmap)
+                val bitmapToExport = fullResBitmap!!
+                action(bitmapToExport)
+                bitmapToExport.recycle()
+                fullResBitmap = null
                 progressBar.progress = 100
 
                 dialog.dismiss()
-            } catch (e: Exception) {
+            } catch (error: CancellationException) {
                 dialog.dismiss()
-                Log.e(TAG, "Full-res export failed", e)
+                throw error
+            } catch (error: Exception) {
+                dialog.dismiss()
+                Log.e(TAG, "Full-res export failed", error)
                 Toast.makeText(
                     this@MainActivity,
-                    "Export failed: ${e.message}",
+                    "Export failed: ${error.message}",
                     Toast.LENGTH_SHORT
                 ).show()
+            } finally {
+                fullResBitmap?.recycle()
             }
         }
     }
@@ -1305,16 +1420,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        imageLoadJob?.cancel()
         imageProcessingJob?.cancel()
         renderJob?.cancel()
         gpuErrorDialog?.dismiss()
         if (gpuStatus == GpuStatus.READY) {
             runBlocking {
                 withContext(gpuDispatcher) {
+                    imageSource?.close()
                     gpuPipeline.release()
                 }
             }
+        } else {
+            imageSource?.close()
         }
+        imageSource = null
         gpuDispatcher.close()
         super.onDestroy()
     }
