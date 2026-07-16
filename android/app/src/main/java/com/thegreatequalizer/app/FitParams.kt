@@ -328,9 +328,11 @@ object FitParams {
         for (i in cdf.indices.reversed()) {
             if (cdf[i] < 1.0 - eps) { last = i; break }
         }
-        if (last < 0) return Triple(cdf, 0.0, 1.0)
 
         val xLo = bins[first]
+        if (last <= first) {
+            return Triple(DoubleArray(0), xLo, xLo)
+        }
         val xHi = bins[last]
 
         val trimmed = cdf.sliceArray(first..last)
@@ -365,7 +367,11 @@ object FitParams {
         }
 
         val (trimmed, xLo, xHi) = trimCdf(cdf, cdf.size)
-        val (fitted, steps) = fitSingleChannel(trimmed, trimmed.size, lr = lr)
+        val (fitted, steps) = if (trimmed.size < 2) {
+            Pair(PARAM_DEFAULTS, 0)
+        } else {
+            fitSingleChannel(trimmed, trimmed.size, lr = lr)
+        }
         val result = fitted.toMutableMap()
         result["x_lo"] = xLo
         result["x_hi"] = xHi
